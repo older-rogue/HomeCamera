@@ -9,27 +9,39 @@ import android.media.MediaFormat
 import android.util.Log
 import android.view.Surface
 import com.zx.homecamera.audio.AacAudioConfig
+import com.zx.homecamera.core.protocol.ControlMessage
+import com.zx.homecamera.core.protocol.ControlProtocol
 import com.zx.homecamera.core.protocol.EncodedMediaFrame
 import com.zx.homecamera.core.protocol.MediaCodecType
 import com.zx.homecamera.core.protocol.MediaFrameReassembler
 import com.zx.homecamera.core.protocol.MediaTrack
 import com.zx.homecamera.core.protocol.MediaUdpPacket
-import java.nio.ByteBuffer
+import java.io.BufferedWriter
 import java.net.DatagramPacket
 import java.net.DatagramSocket
+import java.net.Socket
 import java.net.SocketException
 import java.net.SocketTimeoutException
+import java.nio.ByteBuffer
+import java.util.concurrent.ArrayBlockingQueue
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
+import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicLong
 
 class H264UdpViewer {
     private val running = AtomicBoolean(false)
     private var executor: ExecutorService? = null
     private var socket: DatagramSocket? = null
+    private var controlSocket: Socket? = null
+    private var controlWriter: BufferedWriter? = null
     private var videoDecoder: MediaCodec? = null
     private var audioDecoder: MediaCodec? = null
     private var audioTrack: AudioTrack? = null
+    private var videoQueue: RealtimeVideoFrameQueue? = null
+    private var audioQueue: ArrayBlockingQueue<EncodedMediaFrame>? = null
+    private val lastPacketAtMillis = AtomicLong(0L)
     @Volatile
     private var audioEnabled = false
     private var audioDecoderConfigured = false
@@ -44,15 +56,25 @@ class H264UdpViewer {
     ) {
         stop()
         running.set(true)
-        executor = Executors.newSingleThreadExecutor().also { pool ->
-            pool.execute {
-                runCatching {
-                    receiveAndDecode(connection, surface, onFirstFrame)
-                }.onFailure { error ->
-                    if (running.get()) {
-                        onError(error.message ?: "实时视频接收异常")
-                    }
-                }
+        lastPacketAtMillis.set(System.currentTimeMillis())
+        val localVideoQueue = RealtimeVideoFrameQueue(
+            onKeyFrameNeeded = { requestKeyFrame("video_queue_drop") },
+        )
+        val localAudioQueue = ArrayBlockingQueue<EncodedMediaFrame>(AUDIO_QUEUE_CAPACITY)
+        videoQueue = localVideoQueue
+        audioQueue = localAudioQueue
+        controlSocket = connection.controlSocket
+        controlWriter = connection.controlSocket?.getOutputStream()?.bufferedWriter(Charsets.UTF_8)
+
+        executor = Executors.newFixedThreadPool(3).also { pool ->
+            pool.executeCatching(onError) {
+                receiveFrames(localVideoQueue, localAudioQueue)
+            }
+            pool.executeCatching(onError) {
+                decodeVideoFrames(connection, surface, localVideoQueue, onFirstFrame)
+            }
+            pool.executeCatching(onError) {
+                decodeAudioFrames(connection, localAudioQueue)
             }
         }
     }
@@ -61,6 +83,17 @@ class H264UdpViewer {
         running.set(false)
         socket?.close()
         socket = null
+        controlSocket?.runCatching { close() }
+        controlSocket = null
+        controlWriter = null
+        videoQueue?.clear()
+        videoQueue = null
+        audioQueue?.clear()
+        audioQueue = null
+        val pool = executor
+        pool?.shutdownNow()
+        pool?.runCatching { awaitTermination(WORKER_STOP_TIMEOUT_MILLIS, TimeUnit.MILLISECONDS) }
+        executor = null
         videoDecoder?.runCatching { stop() }
         videoDecoder?.release()
         videoDecoder = null
@@ -72,13 +105,61 @@ class H264UdpViewer {
         audioTrack = null
         audioEnabled = false
         audioDecoderConfigured = false
-        executor?.shutdownNow()
-        executor = null
     }
 
-    private fun receiveAndDecode(
+    private fun receiveFrames(
+        videoQueue: RealtimeVideoFrameQueue,
+        audioQueue: ArrayBlockingQueue<EncodedMediaFrame>,
+    ) {
+        val reassembler = MediaFrameReassembler()
+        val buffer = ByteArray(MediaUdpPacket.DEFAULT_MAX_DATAGRAM_SIZE)
+        DatagramSocket(LanViewerConnector.CLIENT_UDP_PORT).use { udpSocket ->
+            socket = udpSocket
+            udpSocket.receiveBufferSize = UDP_SOCKET_BUFFER_BYTES
+            udpSocket.soTimeout = UDP_RECEIVE_TIMEOUT_MILLIS.toInt()
+            var completedVideoFrames = 0L
+            var completedAudioFrames = 0L
+            var lastStatsLogAtMillis = System.currentTimeMillis()
+            while (running.get()) {
+                val packet = DatagramPacket(buffer, buffer.size)
+                try {
+                    udpSocket.receive(packet)
+                    lastPacketAtMillis.set(System.currentTimeMillis())
+                    val streamPacket = MediaUdpPacket.decode(packet.data, packet.length) ?: continue
+                    val frame = reassembler.accept(streamPacket) ?: continue
+                    when (frame.track) {
+                        MediaTrack.Video -> if (frame.codec == MediaCodecType.H264) {
+                            completedVideoFrames++
+                            videoQueue.offer(frame)
+                        }
+
+                        MediaTrack.Audio -> if (frame.codec == MediaCodecType.Aac) {
+                            completedAudioFrames++
+                            offerLatestAudioFrame(audioQueue, frame)
+                        }
+                    }
+                    val now = System.currentTimeMillis()
+                    if (now - lastStatsLogAtMillis >= STATS_LOG_INTERVAL_MILLIS) {
+                        Log.i(TAG, "udp receiver: video=$completedVideoFrames audio=$completedAudioFrames")
+                        completedVideoFrames = 0L
+                        completedAudioFrames = 0L
+                        lastStatsLogAtMillis = now
+                    }
+                } catch (_: SocketTimeoutException) {
+                    if (System.currentTimeMillis() - lastPacketAtMillis.get() > STREAM_STALL_TIMEOUT_MILLIS) {
+                        throw IllegalStateException("实时视频流已中断，正在重连")
+                    }
+                } catch (_: SocketException) {
+                    if (running.get()) throw IllegalStateException("UDP 视频端口异常")
+                }
+            }
+        }
+    }
+
+    private fun decodeVideoFrames(
         connection: ViewerConnection,
         surface: Surface,
+        videoQueue: RealtimeVideoFrameQueue,
         onFirstFrame: () -> Unit,
     ) {
         val mediaFormat = MediaFormat.createVideoFormat(
@@ -90,57 +171,105 @@ class H264UdpViewer {
         videoDecoder = codec
         codec.configure(mediaFormat, surface, null, 0)
         codec.start()
-        startAudioPlayback(connection)
-
-        val reassembler = MediaFrameReassembler()
-        val buffer = ByteArray(MediaUdpPacket.DEFAULT_MAX_DATAGRAM_SIZE)
         var firstFrameRendered = false
-        var lastPacketAtMillis = System.currentTimeMillis()
-        DatagramSocket(LanViewerConnector.CLIENT_UDP_PORT).use { udpSocket ->
-            socket = udpSocket
-            udpSocket.soTimeout = 1_000
-            while (running.get()) {
-                val packet = DatagramPacket(buffer, buffer.size)
-                try {
-                    udpSocket.receive(packet)
-                    lastPacketAtMillis = System.currentTimeMillis()
-                    val streamPacket = MediaUdpPacket.decode(packet.data, packet.length) ?: continue
-                    val frame = reassembler.accept(streamPacket) ?: continue
-                    when (frame.track) {
-                        MediaTrack.Video -> {
-                            if (frame.codec == MediaCodecType.H264) {
-                                queueVideoFrame(codec, frame.data, frame.timestampMicros, frame.flags)
-                                if (drainVideoDecoder(codec) && !firstFrameRendered) {
-                                    firstFrameRendered = true
-                                    onFirstFrame()
-                                }
-                            }
-                        }
+        var queuedInputFrames = 0L
+        var renderedFrames = 0L
+        var lastStatsLogAtMillis = System.currentTimeMillis()
+        while (running.get()) {
+            val frame = videoQueue.poll(VIDEO_QUEUE_POLL_TIMEOUT_MILLIS)
+            if (frame != null) {
+                if (queueVideoFrame(codec, frame.data, frame.timestampMicros, frame.flags)) {
+                    queuedInputFrames++
+                }
+            }
+            val drainedFrames = drainVideoDecoder(codec)
+            if (drainedFrames > 0) {
+                renderedFrames += drainedFrames
+            }
+            if (drainedFrames > 0 && !firstFrameRendered) {
+                firstFrameRendered = true
+                onFirstFrame()
+            }
+            val now = System.currentTimeMillis()
+            if (now - lastStatsLogAtMillis >= STATS_LOG_INTERVAL_MILLIS) {
+                Log.i(TAG, "video decoder: input=$queuedInputFrames rendered=$renderedFrames")
+                queuedInputFrames = 0L
+                renderedFrames = 0L
+                lastStatsLogAtMillis = now
+            }
+            if (System.currentTimeMillis() - lastPacketAtMillis.get() > STREAM_STALL_TIMEOUT_MILLIS) {
+                throw IllegalStateException("实时视频流已中断，正在重连")
+            }
+        }
+    }
 
-                        MediaTrack.Audio -> {
-                            if (frame.codec == MediaCodecType.Aac) {
-                                handleAudioFrame(frame)
-                            }
-                        }
-                    }
-                } catch (_: SocketTimeoutException) {
-                    drainVideoDecoder(codec)
-                    drainAudioDecoder()
-                    if (System.currentTimeMillis() - lastPacketAtMillis > STREAM_STALL_TIMEOUT_MILLIS) {
-                        throw IllegalStateException("实时视频流已中断，正在重连")
-                    }
-                } catch (_: SocketException) {
-                    if (running.get()) throw IllegalStateException("UDP 视频端口异常")
+    private fun decodeAudioFrames(
+        connection: ViewerConnection,
+        audioQueue: ArrayBlockingQueue<EncodedMediaFrame>,
+    ) {
+        startAudioPlayback(connection)
+        while (running.get()) {
+            val frame = audioQueue.poll(AUDIO_QUEUE_POLL_TIMEOUT_MILLIS, TimeUnit.MILLISECONDS)
+            if (frame != null) {
+                handleAudioFrame(frame)
+            } else {
+                drainAudioDecoder()
+            }
+        }
+    }
+
+    private fun offerLatestAudioFrame(
+        audioQueue: ArrayBlockingQueue<EncodedMediaFrame>,
+        frame: EncodedMediaFrame,
+    ) {
+        if (audioQueue.offer(frame)) return
+        if (frame.flags and MediaUdpPacket.FLAG_CODEC_CONFIG != 0) {
+            audioQueue.clear()
+            audioQueue.offer(frame)
+            return
+        }
+        while (!audioQueue.offer(frame)) {
+            val dropped = audioQueue.poll() ?: return
+            if (dropped.flags and MediaUdpPacket.FLAG_CODEC_CONFIG != 0) {
+                audioQueue.offer(dropped)
+                return
+            }
+        }
+    }
+
+    private fun requestKeyFrame(reason: String) {
+        runCatching {
+            val writer = controlWriter ?: return
+            synchronized(writer) {
+                writer.write(ControlProtocol.encode(ControlMessage.RequestKeyFrame(reason)))
+                writer.newLine()
+                writer.flush()
+            }
+        }.onFailure {
+            Log.w(TAG, "Failed to request key frame", it)
+        }
+    }
+
+    private fun ExecutorService.executeCatching(
+        onError: (String) -> Unit,
+        block: () -> Unit,
+    ) {
+        execute {
+            runCatching(block).onFailure { error ->
+                if (running.get()) {
+                    running.set(false)
+                    socket?.close()
+                    onError(error.message ?: "实时视频接收异常")
                 }
             }
         }
     }
 
-    private fun queueVideoFrame(codec: MediaCodec, data: ByteArray, timestampMicros: Long, flags: Int) {
-        val inputIndex = codec.dequeueInputBuffer(10_000)
-        if (inputIndex < 0) return
+    private fun queueVideoFrame(codec: MediaCodec, data: ByteArray, timestampMicros: Long, flags: Int): Boolean {
+        val inputIndex = codec.dequeueInputBuffer(VIDEO_INPUT_TIMEOUT_MICROS)
+        if (inputIndex < 0) return false
 
-        val inputBuffer = codec.getInputBuffer(inputIndex) ?: return
+        val inputBuffer = codec.getInputBuffer(inputIndex) ?: return false
         inputBuffer.clear()
         inputBuffer.put(data)
         val codecFlags = when {
@@ -149,18 +278,19 @@ class H264UdpViewer {
             else -> 0
         }
         codec.queueInputBuffer(inputIndex, 0, data.size, timestampMicros, codecFlags)
+        return true
     }
 
-    private fun drainVideoDecoder(codec: MediaCodec): Boolean {
+    private fun drainVideoDecoder(codec: MediaCodec): Int {
         val bufferInfo = MediaCodec.BufferInfo()
-        var rendered = false
+        var rendered = 0
         while (true) {
             val outputIndex = codec.dequeueOutputBuffer(bufferInfo, 0)
             when {
                 outputIndex >= 0 -> {
                     val shouldRender = bufferInfo.size > 0
                     codec.releaseOutputBuffer(outputIndex, shouldRender)
-                    rendered = rendered || shouldRender
+                    if (shouldRender) rendered++
                 }
 
                 outputIndex == MediaCodec.INFO_OUTPUT_FORMAT_CHANGED ||
@@ -314,6 +444,14 @@ class H264UdpViewer {
         private const val TAG = "H264UdpViewer"
         private const val CSD_0_KEY = "csd-0"
         private const val STREAM_STALL_TIMEOUT_MILLIS = 3_000L
+        private const val VIDEO_INPUT_TIMEOUT_MICROS = 1_000L
         private const val AUDIO_INPUT_TIMEOUT_MICROS = 10_000L
+        private const val UDP_RECEIVE_TIMEOUT_MILLIS = 1_000L
+        private const val VIDEO_QUEUE_POLL_TIMEOUT_MILLIS = 20L
+        private const val AUDIO_QUEUE_POLL_TIMEOUT_MILLIS = 20L
+        private const val AUDIO_QUEUE_CAPACITY = 16
+        private const val WORKER_STOP_TIMEOUT_MILLIS = 500L
+        private const val UDP_SOCKET_BUFFER_BYTES = 1_048_576
+        private const val STATS_LOG_INTERVAL_MILLIS = 1_000L
     }
 }

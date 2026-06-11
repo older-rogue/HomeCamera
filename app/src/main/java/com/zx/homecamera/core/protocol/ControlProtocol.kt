@@ -31,6 +31,8 @@ sealed interface ControlMessage {
 
     data class Pong(val timestampMillis: Long) : ControlMessage
 
+    data class RequestKeyFrame(val reason: String) : ControlMessage
+
     data class Bye(val reason: String) : ControlMessage
 }
 
@@ -71,6 +73,11 @@ object ControlProtocol {
             is ControlMessage.Pong -> listOf(
                 "type" to "PONG",
                 "timestampMillis" to message.timestampMillis.toString(),
+            )
+
+            is ControlMessage.RequestKeyFrame -> listOf(
+                "type" to "REQUEST_KEY_FRAME",
+                "reason" to message.reason,
             )
 
             is ControlMessage.Bye -> listOf(
@@ -134,6 +141,10 @@ object ControlProtocol {
 
             "PONG" -> ControlMessage.Pong(
                 timestampMillis = fields["timestampMillis"]?.toLongOrNull() ?: return null,
+            )
+
+            "REQUEST_KEY_FRAME" -> ControlMessage.RequestKeyFrame(
+                reason = fields["reason"] ?: "",
             )
 
             "BYE" -> ControlMessage.Bye(

@@ -11,4 +11,9 @@ class H264StreamConfigTest {
         assertEquals(480, H264StreamConfig.HEIGHT)
         assertTrue(H264StreamConfig.WIDTH > H264StreamConfig.HEIGHT)
     }
+
+    @Test
+    fun defaultKeyFrameIntervalAvoidsFrequentRealtimeStutter() {
+        assertTrue(H264StreamConfig.I_FRAME_INTERVAL_SECONDS >= 10)
+    }
 }

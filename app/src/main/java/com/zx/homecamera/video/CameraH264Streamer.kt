@@ -16,6 +16,7 @@ import android.os.Bundle
 import android.os.Handler
 import android.os.HandlerThread
 import android.util.Log
+import android.util.Range
 import android.view.Surface
 import android.view.SurfaceHolder
 import androidx.core.content.ContextCompat
@@ -26,7 +27,6 @@ import com.zx.homecamera.core.protocol.MediaCodecType
 import com.zx.homecamera.core.protocol.MediaTrack
 import com.zx.homecamera.core.protocol.MediaUdpPacket
 import java.io.File
-import java.net.DatagramPacket
 import java.net.DatagramSocket
 import java.net.InetAddress
 import java.util.concurrent.CopyOnWriteArraySet
@@ -72,10 +72,11 @@ class CameraH264Streamer(
     )
     private var appliedPreviewSize: PreviewSize? = null
     private var autofocusMode: Int? = null
+    private var targetFpsRange: CameraFpsRange? = null
     private var streamSocket: DatagramSocket? = null
+    private var realtimeSender: RealtimeUdpSender? = null
     private var latestCodecConfig: ByteArray? = null
     private var latestAudioCodecConfig: ByteArray? = null
-    private var lastAudioCodecConfigSentAtMicros: Long = Long.MIN_VALUE
     private var audioStreamer: AacAudioStreamer? = null
     private val recorder = recordingRoot?.let(::Mp4SegmentRecorder)
 
@@ -94,7 +95,17 @@ class CameraH264Streamer(
             thread.start()
             cameraHandler = Handler(thread.looper)
         }
-        streamSocket = DatagramSocket()
+        streamSocket = DatagramSocket().also { socket ->
+            socket.sendBufferSize = UDP_SOCKET_BUFFER_BYTES
+            realtimeSender = RealtimeUdpSender(
+                clients = {
+                    clients.map { client ->
+                        StreamDestination(client.address.hostAddress ?: client.address.hostName, client.udpPort)
+                    }
+                },
+                socket = DatagramRealtimeUdpSocket(socket),
+            ).also(RealtimeUdpSender::start)
+        }
         selectCameraAndStreamConfig()
         startEncoder()
         openCamera()
@@ -121,8 +132,9 @@ class CameraH264Streamer(
         audioStreamer?.stop()
         audioStreamer = null
         latestAudioCodecConfig = null
-        lastAudioCodecConfigSentAtMicros = Long.MIN_VALUE
         recorder?.stop()
+        realtimeSender?.stop()
+        realtimeSender = null
         streamSocket?.runCatching { close() }
         streamSocket = null
         cameraThread?.runCatching { quitSafely() }
@@ -225,7 +237,32 @@ class CameraH264Streamer(
             sensorOrientationDegrees = sensorOrientation,
             displayRotationDegrees = displayRotationDegrees,
         )
+        val availableFpsRanges = characteristics
+            .get(CameraCharacteristics.CONTROL_AE_AVAILABLE_TARGET_FPS_RANGES)
+            ?.map { range -> CameraFpsRange(range.lower, range.upper) }
+            .orEmpty()
+        targetFpsRange = CameraFpsRangeSelector.choose(
+            ranges = availableFpsRanges,
+            targetFps = streamSelection.fps,
+        )
+        val availableFpsRangesLog = availableFpsRanges.joinToString(
+            prefix = "[",
+            postfix = "]",
+        ) { range -> range.formatForLog() }
+        Log.i(
+            TAG,
+            "stream config: camera=$cameraId " +
+                "buffer=${streamSelection.bufferSize.width}x${streamSelection.bufferSize.height} " +
+                "display=${streamSelection.displaySize.width}x${streamSelection.displaySize.height} " +
+                "fps=${streamSelection.fps} bitrate=${streamSelection.bitrate} " +
+                "iFrame=${streamSelection.iFrameIntervalSeconds}s " +
+                "aeRange=${targetFpsRange.formatForLog()} " +
+                "availableAeRanges=$availableFpsRangesLog",
+        )
     }
+
+    private fun CameraFpsRange?.formatForLog(): String =
+        this?.let { "${it.min}-${it.max}" } ?: "none"
 
     @SuppressLint("MissingPermission")
     private fun openCamera() {
@@ -294,8 +331,16 @@ class CameraH264Streamer(
                                 autofocusMode?.let { mode ->
                                     set(CaptureRequest.CONTROL_AF_MODE, mode)
                                 }
+                                targetFpsRange?.let { range ->
+                                    set(CaptureRequest.CONTROL_AE_TARGET_FPS_RANGE, Range(range.min, range.max))
+                                }
                             }.build()
                             session.setRepeatingRequest(request, null, cameraHandler)
+                            Log.i(
+                                TAG,
+                                "capture request started: generation=$generation " +
+                                    "targets=${targets.size} aeRange=${targetFpsRange.formatForLog()}",
+                            )
                         }.onFailure {
                             if (captureSession == session) {
                                 captureSession = null
@@ -345,8 +390,8 @@ class CameraH264Streamer(
                             if (flags and MediaUdpPacket.FLAG_CODEC_CONFIG != 0) {
                                 latestCodecConfig = data
                             }
-                            recorder?.writeSample(data, flags, bufferInfo.presentationTimeUs)
                             sendVideoFrame(data, flags, bufferInfo.presentationTimeUs)
+                            recorder?.writeSample(data, flags, bufferInfo.presentationTimeUs)
                         }
                         codec.releaseOutputBuffer(outputIndex, false)
                     }
@@ -407,20 +452,6 @@ class CameraH264Streamer(
 
     private fun sendAudioFrame(data: ByteArray, flags: Int, timestampMicros: Long) {
         if (clients.isEmpty()) return
-        if (flags and MediaUdpPacket.FLAG_CODEC_CONFIG == 0) {
-            latestAudioCodecConfig?.let { config ->
-                if (shouldRepeatAudioCodecConfig(timestampMicros)) {
-                    sendMediaPayload(
-                        track = MediaTrack.Audio,
-                        codec = MediaCodecType.Aac,
-                        data = config,
-                        flags = MediaUdpPacket.FLAG_CODEC_CONFIG,
-                        timestampMicros = timestampMicros,
-                    )
-                    lastAudioCodecConfigSentAtMicros = timestampMicros
-                }
-            }
-        }
         sendMediaPayload(
             track = MediaTrack.Audio,
             codec = MediaCodecType.Aac,
@@ -430,10 +461,6 @@ class CameraH264Streamer(
         )
     }
 
-    private fun shouldRepeatAudioCodecConfig(timestampMicros: Long): Boolean =
-        lastAudioCodecConfigSentAtMicros == Long.MIN_VALUE ||
-            timestampMicros - lastAudioCodecConfigSentAtMicros >= AUDIO_CODEC_CONFIG_REPEAT_INTERVAL_MICROS
-
     private fun sendMediaPayload(
         track: MediaTrack,
         codec: MediaCodecType,
@@ -441,25 +468,19 @@ class CameraH264Streamer(
         flags: Int,
         timestampMicros: Long,
     ) {
-        val socket = streamSocket ?: return
-        val datagrams = MediaUdpPacket.encodeFrame(
-            track = track,
-            codec = codec,
-            sequenceNumber = sequenceNumber.incrementAndGet(),
-            timestampMicros = timestampMicros,
-            flags = flags,
-            data = data,
+        realtimeSender?.offer(
+            OutboundMediaFrame(
+                track = track,
+                codec = codec,
+                sequenceNumber = sequenceNumber.incrementAndGet(),
+                timestampMicros = timestampMicros,
+                flags = flags,
+                data = data,
+            ),
         )
-        clients.forEach { client ->
-            datagrams.forEach { datagram ->
-                runCatching {
-                    socket.send(DatagramPacket(datagram, datagram.size, client.address, client.udpPort))
-                }
-            }
-        }
     }
 
-    private fun requestKeyFrame() {
+    fun requestKeyFrame() {
         runCatching {
             val params = Bundle().apply {
                 putInt(MediaCodec.PARAMETER_KEY_REQUEST_SYNC_FRAME, 0)
@@ -499,7 +520,7 @@ class CameraH264Streamer(
 
     companion object {
         private const val TAG = "CameraH264Streamer"
-        private const val AUDIO_CODEC_CONFIG_REPEAT_INTERVAL_MICROS = 1_000_000L
+        private const val UDP_SOCKET_BUFFER_BYTES = 1_048_576
 
         fun rotationDegrees(rotation: Int): Int =
             when (rotation) {

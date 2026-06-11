@@ -12,7 +12,8 @@ import java.util.UUID
 
 class LanViewerConnector {
     fun connect(device: CollectorDevice, timeoutMillis: Int): ViewerConnection {
-        Socket().use { socket ->
+        val socket = Socket()
+        try {
             socket.connect(InetSocketAddress(device.hostAddress, device.tcpPort), timeoutMillis)
             socket.soTimeout = timeoutMillis
 
@@ -35,6 +36,8 @@ class LanViewerConnector {
             }
             return ViewerConnection(
                 collectorDeviceId = response.deviceId,
+                collectorHostAddress = device.hostAddress,
+                collectorTcpPort = device.tcpPort,
                 streamUdpPort = response.udpPort,
                 streamWidth = response.streamWidth,
                 streamHeight = response.streamHeight,
@@ -46,7 +49,11 @@ class LanViewerConnector {
                 audioSampleRate = response.audioSampleRate,
                 audioChannelCount = response.audioChannelCount,
                 audioBitrate = response.audioBitrate,
+                controlSocket = socket,
             )
+        } catch (error: Throwable) {
+            socket.close()
+            throw error
         }
     }
 
@@ -57,6 +64,8 @@ class LanViewerConnector {
 
 data class ViewerConnection(
     val collectorDeviceId: String,
+    val collectorHostAddress: String,
+    val collectorTcpPort: Int,
     val streamUdpPort: Int,
     val streamWidth: Int,
     val streamHeight: Int,
@@ -68,4 +77,5 @@ data class ViewerConnection(
     val audioSampleRate: Int = AacAudioConfig.SAMPLE_RATE,
     val audioChannelCount: Int = AacAudioConfig.CHANNEL_COUNT,
     val audioBitrate: Int = AacAudioConfig.BITRATE,
+    val controlSocket: Socket? = null,
 )

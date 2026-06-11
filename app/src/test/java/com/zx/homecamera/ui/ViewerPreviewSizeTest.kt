@@ -10,6 +10,8 @@ class ViewerPreviewSizeTest {
     fun usesConnectedStreamResolutionForViewerPreview() {
         val connection = ViewerConnection(
             collectorDeviceId = "collector-1",
+            collectorHostAddress = "127.0.0.1",
+            collectorTcpPort = 62001,
             streamUdpPort = 62010,
             streamWidth = 640,
             streamHeight = 480,

@@ -176,31 +176,39 @@ class CollectorForegroundService : Service() {
             val writer = client.getOutputStream().bufferedWriter(Charsets.UTF_8)
             val firstLine = reader.readLine()
             val message = firstLine?.let(ControlProtocol::decode)
-            if (message is ControlMessage.ViewStart) {
-                val streamConfig = cameraStreamer?.streamConfig()
-                val audioConfig = cameraStreamer?.audioConfig()
-                writer.write(
-                    ControlProtocol.encode(
-                        ControlMessage.Hello(
-                            deviceId = deviceId,
-                            deviceName = deviceName,
-                            udpPort = STREAM_PORT,
-                            streamWidth = streamConfig?.bufferSize?.width ?: DEFAULT_STREAM_WIDTH,
-                            streamHeight = streamConfig?.bufferSize?.height ?: DEFAULT_STREAM_HEIGHT,
-                            displayWidth = streamConfig?.displaySize?.width ?: DEFAULT_DISPLAY_WIDTH,
-                            displayHeight = streamConfig?.displaySize?.height ?: DEFAULT_DISPLAY_HEIGHT,
-                            streamFps = streamConfig?.fps ?: DEFAULT_STREAM_FPS,
-                            audioEnabled = audioConfig?.enabled ?: AacAudioConfig.DEFAULT_ENABLED,
-                            audioCodec = audioConfig?.codec ?: AacAudioConfig.CODEC,
-                            audioSampleRate = audioConfig?.sampleRate ?: AacAudioConfig.SAMPLE_RATE,
-                            audioChannelCount = audioConfig?.channelCount ?: AacAudioConfig.CHANNEL_COUNT,
-                            audioBitrate = audioConfig?.bitrate ?: AacAudioConfig.BITRATE,
-                        ),
+            if (message !is ControlMessage.ViewStart) return
+
+            val streamConfig = cameraStreamer?.streamConfig()
+            val audioConfig = cameraStreamer?.audioConfig()
+            writer.write(
+                ControlProtocol.encode(
+                    ControlMessage.Hello(
+                        deviceId = deviceId,
+                        deviceName = deviceName,
+                        udpPort = STREAM_PORT,
+                        streamWidth = streamConfig?.bufferSize?.width ?: DEFAULT_STREAM_WIDTH,
+                        streamHeight = streamConfig?.bufferSize?.height ?: DEFAULT_STREAM_HEIGHT,
+                        displayWidth = streamConfig?.displaySize?.width ?: DEFAULT_DISPLAY_WIDTH,
+                        displayHeight = streamConfig?.displaySize?.height ?: DEFAULT_DISPLAY_HEIGHT,
+                        streamFps = streamConfig?.fps ?: DEFAULT_STREAM_FPS,
+                        audioEnabled = audioConfig?.enabled ?: AacAudioConfig.DEFAULT_ENABLED,
+                        audioCodec = audioConfig?.codec ?: AacAudioConfig.CODEC,
+                        audioSampleRate = audioConfig?.sampleRate ?: AacAudioConfig.SAMPLE_RATE,
+                        audioChannelCount = audioConfig?.channelCount ?: AacAudioConfig.CHANNEL_COUNT,
+                        audioBitrate = audioConfig?.bitrate ?: AacAudioConfig.BITRATE,
                     ),
-                )
-                writer.newLine()
-                writer.flush()
-                cameraStreamer?.addClient(client.inetAddress, message.udpPort)
+                ),
+            )
+            writer.newLine()
+            writer.flush()
+            cameraStreamer?.addClient(client.inetAddress, message.udpPort)
+            client.soTimeout = 0
+
+            while (running) {
+                val controlMessage = reader.readLine()?.let(ControlProtocol::decode) ?: return
+                if (controlMessage is ControlMessage.RequestKeyFrame) {
+                    cameraStreamer?.requestKeyFrame()
+                }
             }
         }
     }

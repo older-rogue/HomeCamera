@@ -81,6 +81,16 @@ class ControlProtocolTest {
     }
 
     @Test
+    fun requestKeyFrameMessageRoundTripsWithReason() {
+        val message = ControlMessage.RequestKeyFrame(reason = "video_queue_drop")
+
+        val encoded = ControlProtocol.encode(message)
+        val decoded = ControlProtocol.decode(encoded)
+
+        assertEquals(message, decoded)
+    }
+
+    @Test
     fun invalidMessageReturnsNull() {
         assertNull(ControlProtocol.decode("NOT_HOME_CAMERA|value=1"))
     }

@@ -59,6 +59,8 @@ class LanViewerConnectorTest {
             assertEquals(720, result.displayWidth)
             assertEquals(1280, result.displayHeight)
             assertEquals(20, result.streamFps)
+            assertEquals("127.0.0.1", result.collectorHostAddress)
+            assertEquals(server.localPort, result.collectorTcpPort)
             executor.shutdownNow()
         }
     }
