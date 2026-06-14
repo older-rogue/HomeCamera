@@ -5,6 +5,9 @@ class CollectorServiceLifecycle {
     private var latestStartId = 0
     private var pendingStopStartId: Int? = null
 
+    val isRunning: Boolean
+        @Synchronized get() = running
+
     @Synchronized
     fun onStart(startId: Int): Decision {
         latestStartId = maxOf(latestStartId, startId)

@@ -114,7 +114,6 @@ object HomeCameraReducer {
                 AppRole.Client -> state.copy(
                     role = AppRole.Client,
                     screen = Screen.ClientList,
-                    client = state.client.copy(scanStatus = ScanStatus.Scanning),
                 )
             }
 

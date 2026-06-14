@@ -75,6 +75,7 @@ class CameraH264Streamer(
     private var targetFpsRange: CameraFpsRange? = null
     private var streamSocket: DatagramSocket? = null
     private var realtimeSender: RealtimeUdpSender? = null
+    @Volatile
     private var latestCodecConfig: ByteArray? = null
     private var latestAudioCodecConfig: ByteArray? = null
     private var audioStreamer: AacAudioStreamer? = null
@@ -122,7 +123,7 @@ class CameraH264Streamer(
         previewHolder = null
         appliedPreviewSize = null
         drainExecutor?.shutdownNow()
-        drainExecutor?.awaitTermination(500, TimeUnit.MILLISECONDS)
+        drainExecutor?.awaitTermination(2_000, TimeUnit.MILLISECONDS)
         drainExecutor = null
         encoderInputSurface?.runCatching { release() }
         encoderInputSurface = null

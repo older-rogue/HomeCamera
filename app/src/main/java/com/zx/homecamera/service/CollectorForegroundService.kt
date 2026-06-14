@@ -6,6 +6,8 @@ import android.app.NotificationManager
 import android.app.Service
 import android.content.Context
 import android.content.Intent
+import android.net.ConnectivityManager
+import android.net.NetworkCapabilities
 import android.os.Build
 import android.os.IBinder
 import android.provider.Settings
@@ -33,8 +35,6 @@ import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
 
 class CollectorForegroundService : Service() {
-    @Volatile
-    private var running = false
     private val lifecycle = CollectorServiceLifecycle()
     private var executor: ExecutorService? = null
     private var discoverySocket: DatagramSocket? = null
@@ -63,7 +63,6 @@ class CollectorForegroundService : Service() {
 
     private fun startCollector(startId: Int) {
         val decision = lifecycle.onStart(startId)
-        running = decision.isRunning
         if (!decision.shouldStartResources) return
 
         startForeground(NOTIFICATION_ID, buildNotification(isCollecting = true))
@@ -72,13 +71,14 @@ class CollectorForegroundService : Service() {
             cameraStreamer = streamer
             CollectorCameraRuntime.attachStreamer(streamer)
             streamer.start()
+            sendStatusBroadcast(STATUS_RUNNING)
         } catch (error: Exception) {
             val failure = lifecycle.onStartFailed(startId)
-            running = failure.isRunning
             if (failure.shouldReleaseResources) {
                 releaseCollectorResources()
             }
             stopForeground(STOP_FOREGROUND_REMOVE)
+            sendStatusBroadcast(STATUS_ERROR, EXTRA_MESSAGE, error.message ?: "采集端启动失败")
             if (failure.shouldRequestServiceStop) {
                 lifecycle.onServiceStopResult(startId, stopSelfResult(startId))
             }
@@ -94,9 +94,9 @@ class CollectorForegroundService : Service() {
 
     private fun stopCollector(startId: Int) {
         val decision = lifecycle.onStop(startId)
-        running = decision.isRunning
         if (decision.shouldReleaseResources) {
             releaseCollectorResources()
+            sendStatusBroadcast(STATUS_STOPPED)
         }
         if (decision.shouldKeepServiceForeground) {
             startForeground(NOTIFICATION_ID, buildNotification(isCollecting = false))
@@ -125,7 +125,7 @@ class CollectorForegroundService : Service() {
             DatagramSocket(DiscoveryProtocol.UDP_PORT).use { socket ->
                 discoverySocket = socket
                 val buffer = ByteArray(2048)
-                while (running) {
+                while (lifecycle.isRunning) {
                     val request = DatagramPacket(buffer, buffer.size)
                     socket.receive(request)
                     val text = String(request.data, request.offset, request.length, Charsets.UTF_8)
@@ -144,8 +144,6 @@ class CollectorForegroundService : Service() {
             }
         } catch (_: SocketException) {
             // Socket is closed during normal service shutdown.
-        } catch (_: Exception) {
-            running = false
         }
     }
 
@@ -155,7 +153,7 @@ class CollectorForegroundService : Service() {
         try {
             ServerSocket(CONTROL_PORT).use { server ->
                 serverSocket = server
-                while (running) {
+                while (lifecycle.isRunning) {
                     val socket = server.accept()
                     executor?.executeCatching {
                         handleClient(socket, deviceId, deviceName)
@@ -164,8 +162,6 @@ class CollectorForegroundService : Service() {
             }
         } catch (_: SocketException) {
             // Socket is closed during normal service shutdown.
-        } catch (_: Exception) {
-            running = false
         }
     }
 
@@ -204,7 +200,7 @@ class CollectorForegroundService : Service() {
             cameraStreamer?.addClient(client.inetAddress, message.udpPort)
             client.soTimeout = 0
 
-            while (running) {
+            while (lifecycle.isRunning) {
                 val controlMessage = reader.readLine()?.let(ControlProtocol::decode) ?: return
                 if (controlMessage is ControlMessage.RequestKeyFrame) {
                     cameraStreamer?.requestKeyFrame()
@@ -261,21 +257,32 @@ class CollectorForegroundService : Service() {
     }
 
     private fun localHostAddress(): String {
-        val wifiManager = applicationContext.getSystemService(Context.WIFI_SERVICE) as? android.net.wifi.WifiManager
-        val ipAddress = wifiManager?.connectionInfo?.ipAddress ?: return "0.0.0.0"
-        return InetAddress.getByAddress(
-            byteArrayOf(
-                (ipAddress and 0xff).toByte(),
-                (ipAddress shr 8 and 0xff).toByte(),
-                (ipAddress shr 16 and 0xff).toByte(),
-                (ipAddress shr 24 and 0xff).toByte(),
-            ),
-        ).hostAddress ?: "0.0.0.0"
+        val cm = applicationContext.getSystemService(Context.CONNECTIVITY_SERVICE) as? ConnectivityManager
+            ?: return "0.0.0.0"
+        val network = cm.activeNetwork ?: return "0.0.0.0"
+        val linkProperties = cm.getLinkProperties(network) ?: return "0.0.0.0"
+        return linkProperties.linkAddresses
+            .firstOrNull { it.address is java.net.Inet4Address }
+            ?.address?.hostAddress ?: "0.0.0.0"
+    }
+
+    private fun sendStatusBroadcast(status: String, extraKey: String? = null, extraValue: String? = null) {
+        val intent = Intent(ACTION_COLLECTOR_STATUS).apply {
+            putExtra(EXTRA_STATUS, status)
+            extraKey?.let { putExtra(it, extraValue ?: "") }
+        }
+        sendBroadcast(intent)
     }
 
     companion object {
         const val ACTION_START = "com.zx.homecamera.action.START_COLLECTOR"
         const val ACTION_STOP = "com.zx.homecamera.action.STOP_COLLECTOR"
+        const val ACTION_COLLECTOR_STATUS = "com.zx.homecamera.action.COLLECTOR_STATUS"
+        const val EXTRA_STATUS = "status"
+        const val EXTRA_MESSAGE = "message"
+        const val STATUS_RUNNING = "running"
+        const val STATUS_ERROR = "error"
+        const val STATUS_STOPPED = "stopped"
         const val CONTROL_PORT = 62001
         const val STREAM_PORT = 62010
         private const val CHANNEL_ID = "collector"

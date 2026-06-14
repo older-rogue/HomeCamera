@@ -24,7 +24,12 @@ object CollectorCameraRuntime {
     fun detachStreamer(streamer: CameraH264Streamer) {
         if (this.streamer == streamer) {
             streamer.setPreviewSurface(null)
+            streamer.setPreviewDisplaySizeListener(null)
             this.streamer = null
+            previewHolder = null
+            previewWidth = 0
+            previewHeight = 0
+            previewSizeListener = null
         }
     }
 

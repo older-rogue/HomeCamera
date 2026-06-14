@@ -53,15 +53,16 @@ class AacAudioStreamer(
 
     fun stop() {
         running.set(false)
+        // 先停 executor，等线程退出后再释放 codec/recorder
+        executor?.shutdownNow()
+        executor?.awaitTermination(2_000, TimeUnit.MILLISECONDS)
+        executor = null
         audioRecord?.runCatching { stop() }
         audioRecord?.runCatching { release() }
         audioRecord = null
         encoder?.runCatching { stop() }
         encoder?.runCatching { release() }
         encoder = null
-        executor?.shutdownNow()
-        executor?.awaitTermination(500, TimeUnit.MILLISECONDS)
-        executor = null
     }
 
     @SuppressLint("MissingPermission")

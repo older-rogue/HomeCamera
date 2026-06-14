@@ -48,6 +48,7 @@ class RealtimeUdpSender(
     private val sleeper: (Long) -> Unit = ::sleepMicros,
 ) {
     private val running = AtomicBoolean(false)
+    private val lock = Any()
     private val queue = ArrayDeque<OutboundMediaFrame>(queueCapacity)
     private var executor: ExecutorService? = null
     private var droppedFrames = 0L
@@ -74,38 +75,38 @@ class RealtimeUdpSender(
 
     fun stop() {
         running.set(false)
-        synchronized(queue) {
+        synchronized(lock) {
             queue.clear()
-            (queue as java.lang.Object).notifyAll()
+            (lock as Object).notifyAll()
         }
         executor?.shutdownNow()
         executor = null
     }
 
     fun offer(frame: OutboundMediaFrame) {
-        synchronized(queue) {
+        synchronized(lock) {
             if (queue.size >= queueCapacity) {
                 val dropped = removeOldestNonKeyVideoFrame() ?: queue.pollFirst()
                 if (dropped != null) droppedFrames++
             }
             queue.addLast(frame)
-            (queue as java.lang.Object).notifyAll()
+            (lock as Object).notifyAll()
         }
     }
 
     fun sendNextForTest() {
-        val frame = synchronized(queue) { queue.pollFirst() } ?: return
+        val frame = synchronized(lock) { queue.pollFirst() } ?: return
         sendFrame(frame)
     }
 
     fun drainQueuedForTest(): List<OutboundMediaFrame> =
-        synchronized(queue) { queue.toList() }
+        synchronized(lock) { queue.toList() }
 
     private fun sendNextBlocking() {
-        val frame = synchronized(queue) {
+        val frame = synchronized(lock) {
             while (running.get() && queue.isEmpty()) {
                 try {
-                    (queue as java.lang.Object).wait(20L)
+                    (lock as Object).wait(20L)
                 } catch (_: InterruptedException) {
                     Thread.currentThread().interrupt()
                     return
@@ -128,14 +129,14 @@ class RealtimeUdpSender(
             flags = frame.flags,
             data = frame.data,
         )
-        destinations.forEach { destination ->
-            datagrams.forEachIndexed { index, datagram ->
+        datagrams.forEachIndexed { index, datagram ->
+            destinations.forEach { destination ->
                 runCatching {
                     socket.send(datagram, destination)
                 }
-                if (packetPacingMicros > 0L && index < datagrams.lastIndex) {
-                    sleeper(packetPacingMicros)
-                }
+            }
+            if (packetPacingMicros > 0L && index < datagrams.lastIndex) {
+                sleeper(packetPacingMicros)
             }
         }
         recordStats(frame, datagrams.size)
