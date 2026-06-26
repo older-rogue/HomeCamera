@@ -105,6 +105,7 @@ class CameraH264Streamer(
                     }
                 },
                 socket = DatagramRealtimeUdpSocket(socket),
+                packetPacingMicros = H264StreamConfig.PACKET_PACING_MICROS,
             ).also(RealtimeUdpSender::start)
         }
         selectCameraAndStreamConfig()
@@ -210,6 +211,7 @@ class CameraH264Streamer(
             setInteger(MediaFormat.KEY_COLOR_FORMAT, MediaCodecInfo.CodecCapabilities.COLOR_FormatSurface)
             setInteger(MediaFormat.KEY_BIT_RATE, selection.bitrate)
             setInteger(MediaFormat.KEY_FRAME_RATE, selection.fps)
+            setInteger(MediaFormat.KEY_BITRATE_MODE, MediaCodecInfo.EncoderCapabilities.BITRATE_MODE_CBR)
             setInteger(MediaFormat.KEY_I_FRAME_INTERVAL, selection.iFrameIntervalSeconds)
         }
 
@@ -367,13 +369,23 @@ class CameraH264Streamer(
     }
 
     private fun drainEncoder() {
+        var lastEncoderOutputAtNanos = System.nanoTime()
+        var encoderFrameCount = 0L
+        var encoderTotalBytes = 0L
+        var encoderLastStatsAtNanos = System.nanoTime()
         val codec = encoder ?: return
         val bufferInfo = MediaCodec.BufferInfo()
         try {
             while (running.get()) {
+            val dequeueStartNanos = System.nanoTime()
                 val outputIndex = codec.dequeueOutputBuffer(bufferInfo, 10_000)
                 when {
                     outputIndex >= 0 -> {
+                        val encoderOutputNanos = System.nanoTime()
+                        val encoderIntervalMs = (encoderOutputNanos - lastEncoderOutputAtNanos) / 1_000_000.0
+                        lastEncoderOutputAtNanos = encoderOutputNanos
+                        encoderFrameCount++
+                        encoderTotalBytes += bufferInfo.size
                         val outputBuffer = codec.getOutputBuffer(outputIndex)
                         if (outputBuffer != null && bufferInfo.size > 0) {
                             outputBuffer.position(bufferInfo.offset)
@@ -392,7 +404,24 @@ class CameraH264Streamer(
                                 latestCodecConfig = data
                             }
                             sendVideoFrame(data, flags, bufferInfo.presentationTimeUs)
+                            val encoderNow = System.nanoTime()
+                            if (encoderNow - encoderLastStatsAtNanos >= 2_000_000_000L) {
+                                val elapsedSec = (encoderNow - encoderLastStatsAtNanos) / 1_000_000_000.0
+                                val avgFps = encoderFrameCount / elapsedSec
+                                val avgKbps = (encoderTotalBytes * 8 / 1_000) / elapsedSec
+                                Log.i(TAG, "encoder stats: frames=${encoderFrameCount} avgFps=%.1f avgKbps=%.0f".format(avgFps, avgKbps))
+                                encoderFrameCount = 0L
+                                encoderTotalBytes = 0L
+                                encoderLastStatsAtNanos = encoderNow
+                            }
+                            if (encoderIntervalMs > 100.0) {
+                                Log.w(TAG, "encoder gap: %.0fms size=${bufferInfo.size}B flags=$flags".format(encoderIntervalMs))
+                            }
                             recorder?.writeSample(data, flags, bufferInfo.presentationTimeUs)
+                            val recorderWriteMs = (System.nanoTime() - encoderOutputNanos) / 1_000_000.0
+                            if (recorderWriteMs > 50.0) {
+                                Log.w(TAG, "recorder write slow: %.1fms".format(recorderWriteMs))
+                            }
                         }
                         codec.releaseOutputBuffer(outputIndex, false)
                     }

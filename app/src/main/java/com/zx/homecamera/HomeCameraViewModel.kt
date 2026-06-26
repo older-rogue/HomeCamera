@@ -5,6 +5,7 @@ import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
+import android.net.wifi.WifiManager
 import android.os.Build
 import android.view.Surface
 import androidx.lifecycle.AndroidViewModel
@@ -15,10 +16,14 @@ import com.zx.homecamera.core.app.HomeCameraAction
 import com.zx.homecamera.core.app.HomeCameraReducer
 import com.zx.homecamera.core.app.HomeCameraState
 import com.zx.homecamera.core.app.ViewerStatus
+import com.zx.homecamera.debug.LocalDebugSession
 import com.zx.homecamera.network.H264UdpViewer
-import com.zx.homecamera.network.LanDiscoveryScanner
 import com.zx.homecamera.network.LanViewerConnector
+import com.zx.homecamera.network.logNet
+import com.zx.homecamera.network.SocketTcpPortConnector
+import com.zx.homecamera.network.TcpSubnetScanner
 import com.zx.homecamera.network.ViewerConnection
+import com.zx.homecamera.network.WifiSubnetProvider
 import com.zx.homecamera.service.CollectorForegroundService
 import com.zx.homecamera.video.CameraH264Streamer
 import com.zx.homecamera.video.CollectorCameraRuntime
@@ -30,6 +35,8 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
 import java.util.concurrent.Executors
+import java.util.concurrent.Future
+import java.util.concurrent.atomic.AtomicLong
 
 class HomeCameraViewModel(application: Application) : AndroidViewModel(application) {
     private val _state = MutableStateFlow(HomeCameraState())
@@ -38,6 +45,10 @@ class HomeCameraViewModel(application: Application) : AndroidViewModel(applicati
     private val scannerExecutor = Executors.newSingleThreadExecutor()
     private val viewerExecutor = Executors.newSingleThreadExecutor()
     private val viewerStream = H264UdpViewer()
+    private val scanGeneration = AtomicLong()
+    private var scanFuture: Future<*>? = null
+    private var localDebugSession: LocalDebugSession? = null
+    private var wifiLock: WifiManager.WifiLock? = null
 
     @Volatile
     private var viewerConnection: ViewerConnection? = null
@@ -112,7 +123,9 @@ class HomeCameraViewModel(application: Application) : AndroidViewModel(applicati
             }
 
             is HomeCameraAction.OpenViewer -> {
+                cancelScan()
                 viewerStream.stop()
+        releaseWifiLock()
                 viewerConnection = null
                 viewerStreamKey = null
                 _state.value = HomeCameraReducer.reduce(_state.value, action)
@@ -123,6 +136,7 @@ class HomeCameraViewModel(application: Application) : AndroidViewModel(applicati
 
             HomeCameraAction.BackToClientList -> {
                 viewerStream.stop()
+        releaseWifiLock()
                 viewerConnection = null
                 viewerSurface = null
                 viewerStreamKey = null
@@ -130,10 +144,28 @@ class HomeCameraViewModel(application: Application) : AndroidViewModel(applicati
             }
 
             HomeCameraAction.BackToRoleSelection -> {
+                cancelScan()
                 viewerStream.stop()
+        releaseWifiLock()
                 viewerConnection = null
                 viewerSurface = null
                 viewerStreamKey = null
+                localDebugSession?.stop()
+                localDebugSession = null
+                _state.value = HomeCameraReducer.reduce(_state.value, action)
+            }
+
+            HomeCameraAction.EnterLocalDebug -> {
+                _state.value = HomeCameraReducer.reduce(_state.value, action)
+            }
+
+            HomeCameraAction.ExitLocalDebug -> {
+                localDebugSession?.stop()
+                localDebugSession = null
+                _state.value = HomeCameraReducer.reduce(_state.value, action)
+            }
+
+            is HomeCameraAction.LocalDebugStatusChanged -> {
                 _state.value = HomeCameraReducer.reduce(_state.value, action)
             }
 
@@ -156,6 +188,7 @@ class HomeCameraViewModel(application: Application) : AndroidViewModel(applicati
     fun onViewerSurfaceDestroyed() {
         viewerSurface = null
         viewerStream.stop()
+        releaseWifiLock()
         viewerStreamKey = null
         if (_state.value.viewer.status == ViewerStatus.Playing) {
             _state.value = HomeCameraReducer.reduce(
@@ -181,13 +214,88 @@ class HomeCameraViewModel(application: Application) : AndroidViewModel(applicati
         CollectorCameraRuntime.setPreviewDisplaySizeListener(listener)
     }
 
+    fun startLocalDebugSession(surface: Surface) {
+        localDebugSession?.stop()
+        val session = LocalDebugSession(getApplication())
+        localDebugSession = session
+        session.start(
+            viewerSurface = surface,
+            onFirstFrame = {
+                viewModelScope.launch {
+                    _state.value = HomeCameraReducer.reduce(
+                        _state.value,
+                        HomeCameraAction.LocalDebugStatusChanged(ViewerStatus.Playing),
+                    )
+                }
+            },
+            onError = { message ->
+                viewModelScope.launch {
+                    _state.value = HomeCameraReducer.reduce(
+                        _state.value,
+                        HomeCameraAction.LocalDebugStatusChanged(ViewerStatus.Error, message),
+                    )
+                }
+            },
+        )
+    }
+
+    fun stopLocalDebugSession() {
+        localDebugSession?.stop()
+        localDebugSession = null
+    }
+
     private fun scanCollectors() {
-        scannerExecutor.execute {
-            val devices = LanDiscoveryScanner().scan(timeoutMillis = 1_800)
-            viewModelScope.launch {
+        cancelScan()
+        val generation = scanGeneration.incrementAndGet()
+        val context = getApplication<Application>()
+        scanFuture = scannerExecutor.submit {
+            val subnetProvider = WifiSubnetProvider(context)
+            while (!Thread.currentThread().isInterrupted && scanGeneration.get() == generation) {
+                val subnet = subnetProvider.subnet().getOrElse { error ->
+                    dispatchScanFailed(generation, error.message ?: "无法获取 Wi-Fi 网段")
+                    return@submit
+                }
+                logNet("scan loop generation=$generation local=${subnet.localAddress} hosts=${subnet.hosts.first()}..${subnet.hosts.last()}")
+                val devices = TcpSubnetScanner(
+                    SocketTcpPortConnector(subnet.network.socketFactory),
+                ).scan(
+                    hosts = subnet.hosts,
+                    tcpPort = CollectorForegroundService.CONTROL_PORT,
+                )
+                if (scanGeneration.get() != generation || Thread.currentThread().isInterrupted) return@submit
+                if (devices.isNotEmpty()) {
+                    viewModelScope.launch {
+                        if (scanGeneration.get() == generation) {
+                            _state.value = HomeCameraReducer.reduce(
+                                _state.value,
+                                HomeCameraAction.DevicesDiscovered(devices),
+                            )
+                        }
+                    }
+                    return@submit
+                }
+                try {
+                    Thread.sleep(SCAN_RETRY_DELAY_MILLIS)
+                } catch (_: InterruptedException) {
+                    Thread.currentThread().interrupt()
+                    return@submit
+                }
+            }
+        }
+    }
+
+    private fun cancelScan() {
+        scanGeneration.incrementAndGet()
+        scanFuture?.cancel(true)
+        scanFuture = null
+    }
+
+    private fun dispatchScanFailed(generation: Long, reason: String) {
+        viewModelScope.launch {
+            if (scanGeneration.get() == generation) {
                 _state.value = HomeCameraReducer.reduce(
                     _state.value,
-                    HomeCameraAction.DevicesDiscovered(devices),
+                    HomeCameraAction.ScanFailed(reason),
                 )
             }
         }
@@ -213,6 +321,7 @@ class HomeCameraViewModel(application: Application) : AndroidViewModel(applicati
         if (connection != null && surface != null && surface.isValid) {
             val streamKey = "${connection.collectorDeviceId}:${surface.hashCode()}"
             if (viewerStreamKey == streamKey) return
+            acquireWifiLock()
             viewerStreamKey = streamKey
             viewerStream.start(
                 connection = connection,
@@ -228,6 +337,7 @@ class HomeCameraViewModel(application: Application) : AndroidViewModel(applicati
                 onError = { message ->
                     viewModelScope.launch {
                         viewerStream.stop()
+        releaseWifiLock()
                         viewerConnection = null
                         viewerStreamKey = null
                         _state.value = HomeCameraReducer.reduce(
@@ -283,7 +393,11 @@ class HomeCameraViewModel(application: Application) : AndroidViewModel(applicati
     }
 
     override fun onCleared() {
+        cancelScan()
         viewerStream.stop()
+        releaseWifiLock()
+        localDebugSession?.stop()
+        localDebugSession = null
         scannerExecutor.shutdownNow()
         viewerExecutor.shutdownNow()
         try {
@@ -294,7 +408,25 @@ class HomeCameraViewModel(application: Application) : AndroidViewModel(applicati
         super.onCleared()
     }
 
+    private fun acquireWifiLock() {
+        if (wifiLock?.isHeld == true) return
+        val wifiManager = getApplication<Application>().getSystemService(Context.WIFI_SERVICE) as? WifiManager
+        wifiLock = wifiManager?.createWifiLock(
+            WifiManager.WIFI_MODE_FULL_HIGH_PERF,
+            "HomeCamera:Viewer",
+        )
+        wifiLock?.acquire()
+    }
+
+    private fun releaseWifiLock() {
+        wifiLock?.run {
+            if (isHeld) release()
+        }
+        wifiLock = null
+    }
+
     companion object {
+        private const val SCAN_RETRY_DELAY_MILLIS = 5_000L
         private const val ACTION_START = CollectorForegroundService.ACTION_START
         private const val ACTION_STOP = CollectorForegroundService.ACTION_STOP
     }

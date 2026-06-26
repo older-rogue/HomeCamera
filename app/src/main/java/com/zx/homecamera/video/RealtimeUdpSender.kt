@@ -85,6 +85,7 @@ class RealtimeUdpSender(
 
     fun offer(frame: OutboundMediaFrame) {
         synchronized(lock) {
+            val queueDepth = queue.size
             if (queue.size >= queueCapacity) {
                 val dropped = removeOldestNonKeyVideoFrame() ?: queue.pollFirst()
                 if (dropped != null) droppedFrames++
@@ -121,6 +122,7 @@ class RealtimeUdpSender(
         val destinations = clients()
         if (destinations.isEmpty()) return
 
+        val sendStartNanos = System.nanoTime()
         val datagrams = MediaUdpPacket.encodeFrame(
             track = frame.track,
             codec = frame.codec,
@@ -138,6 +140,10 @@ class RealtimeUdpSender(
             if (packetPacingMicros > 0L && index < datagrams.lastIndex) {
                 sleeper(packetPacingMicros)
             }
+        }
+        val sendElapsedMs = (System.nanoTime() - sendStartNanos) / 1_000_000.0
+        if (sendElapsedMs > 20.0 && frame.track == MediaTrack.Video) {
+            Log.w(TAG, "sendFrame slow: %.1fms datagrams=${datagrams.size} size=${frame.data.size}B flags=${frame.flags}".format(sendElapsedMs))
         }
         recordStats(frame, datagrams.size)
     }
@@ -163,10 +169,11 @@ class RealtimeUdpSender(
         }
         val now = System.currentTimeMillis()
         if (now - lastStatsLogAtMillis >= STATS_LOG_INTERVAL_MILLIS) {
+            val currentQueueDepth = synchronized(lock) { queue.size }
             Log.i(
                 TAG,
                 "udp sender: video=$sentVideoFrames key=$sentKeyFrames datagrams=$sentDatagrams " +
-                    "maxFrameDatagrams=$maxDatagramsPerFrame dropped=$droppedFrames",
+                    "maxFrameDatagrams=$maxDatagramsPerFrame dropped=$droppedFrames queue=$currentQueueDepth",
             )
             sentVideoFrames = 0L
             sentKeyFrames = 0L
@@ -180,7 +187,7 @@ class RealtimeUdpSender(
     companion object {
         const val FLAG_KEY_FRAME = MediaUdpPacket.FLAG_KEY_FRAME
         const val DEFAULT_QUEUE_CAPACITY = 12
-        const val DEFAULT_PACKET_PACING_MICROS = 250L
+        const val DEFAULT_PACKET_PACING_MICROS = 0L
         private const val STATS_LOG_INTERVAL_MILLIS = 1_000L
         private const val TAG = "RealtimeUdpSender"
 

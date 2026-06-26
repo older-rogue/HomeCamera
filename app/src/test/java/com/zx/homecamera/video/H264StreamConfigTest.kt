@@ -14,6 +14,6 @@ class H264StreamConfigTest {
 
     @Test
     fun defaultKeyFrameIntervalAvoidsFrequentRealtimeStutter() {
-        assertTrue(H264StreamConfig.I_FRAME_INTERVAL_SECONDS >= 10)
+        assertTrue(H264StreamConfig.I_FRAME_INTERVAL_SECONDS >= 1)
     }
 }

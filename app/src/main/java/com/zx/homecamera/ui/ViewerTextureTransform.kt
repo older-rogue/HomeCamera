@@ -22,12 +22,12 @@ object ViewerTextureTransform {
         }
         val containerAspectRatio = containerWidth.toFloat() / containerHeight.toFloat()
         val visualSize = if (visualAspectRatio > containerAspectRatio) {
-            val visualHeight = containerHeight
-            val visualWidth = (visualHeight * visualAspectRatio).roundToInt()
-            VideoSize(visualWidth, visualHeight)
-        } else {
             val visualWidth = containerWidth
             val visualHeight = (visualWidth / visualAspectRatio).roundToInt()
+            VideoSize(visualWidth, visualHeight)
+        } else {
+            val visualHeight = containerHeight
+            val visualWidth = (visualHeight * visualAspectRatio).roundToInt()
             VideoSize(visualWidth, visualHeight)
         }
 

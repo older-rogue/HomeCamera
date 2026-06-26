@@ -133,8 +133,8 @@ class RealtimeVideoFrameQueue(
     )
 
     companion object {
-        const val DEFAULT_CAPACITY = 4
-        const val DEFAULT_MAX_QUEUE_DELAY_MILLIS = 300L
+        const val DEFAULT_CAPACITY = 8
+        const val DEFAULT_MAX_QUEUE_DELAY_MILLIS = 1_000L
         const val DEFAULT_KEY_FRAME_REQUEST_INTERVAL_MILLIS = 500L
     }
 }

@@ -1,32 +1,31 @@
 package com.zx.homecamera.service
 
+import android.annotation.SuppressLint
 import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.Service
 import android.content.Context
 import android.content.Intent
-import android.net.ConnectivityManager
-import android.net.NetworkCapabilities
+import android.net.wifi.WifiManager
 import android.os.Build
 import android.os.IBinder
+import android.os.PowerManager
 import android.provider.Settings
 import androidx.core.app.NotificationCompat
 import com.zx.homecamera.R
 import com.zx.homecamera.audio.AacAudioConfig
-import com.zx.homecamera.core.discovery.DiscoveryPacket
-import com.zx.homecamera.core.discovery.DiscoveryProtocol
 import com.zx.homecamera.core.protocol.ControlMessage
 import com.zx.homecamera.core.protocol.ControlProtocol
 import com.zx.homecamera.core.storage.RecordingStorageCleaner
+import com.zx.homecamera.network.logNet
+import com.zx.homecamera.network.logNetError
 import com.zx.homecamera.video.CameraH264Streamer
 import com.zx.homecamera.video.CollectorCameraRuntime
 import java.io.BufferedReader
 import java.io.File
 import java.io.InputStreamReader
-import java.net.DatagramPacket
-import java.net.DatagramSocket
-import java.net.InetAddress
+import java.net.NetworkInterface
 import java.net.ServerSocket
 import java.net.Socket
 import java.net.SocketException
@@ -37,9 +36,10 @@ import java.util.concurrent.Executors
 class CollectorForegroundService : Service() {
     private val lifecycle = CollectorServiceLifecycle()
     private var executor: ExecutorService? = null
-    private var discoverySocket: DatagramSocket? = null
     private var serverSocket: ServerSocket? = null
     private var cameraStreamer: CameraH264Streamer? = null
+    private var wifiLock: WifiManager.WifiLock? = null
+    private var cpuWakeLock: PowerManager.WakeLock? = null
     private val recordingRoot: File
         get() = File(getExternalFilesDir(null), "recordings")
 
@@ -72,6 +72,8 @@ class CollectorForegroundService : Service() {
             CollectorCameraRuntime.attachStreamer(streamer)
             streamer.start()
             sendStatusBroadcast(STATUS_RUNNING)
+            acquireWifiLock()
+            acquireCpuWakeLock()
         } catch (error: Exception) {
             val failure = lifecycle.onStartFailed(startId)
             if (failure.shouldReleaseResources) {
@@ -86,7 +88,6 @@ class CollectorForegroundService : Service() {
         }
 
         executor = Executors.newFixedThreadPool(4).also { pool ->
-            pool.executeCatching(::runDiscoveryResponder)
             pool.executeCatching(::runControlServer)
             pool.executeCatching(::cleanRecordingsOnce)
         }
@@ -107,44 +108,15 @@ class CollectorForegroundService : Service() {
     }
 
     private fun releaseCollectorResources() {
-        discoverySocket?.runCatching { close() }
-        discoverySocket = null
         serverSocket?.runCatching { close() }
         serverSocket = null
         cameraStreamer?.runCatching { stop() }
         cameraStreamer?.runCatching { CollectorCameraRuntime.detachStreamer(this) }
         cameraStreamer = null
         executor?.runCatching { shutdownNow() }
+        releaseWifiLock()
+        releaseCpuWakeLock()
         executor = null
-    }
-
-    private fun runDiscoveryResponder() {
-        val deviceId = Settings.Secure.getString(contentResolver, Settings.Secure.ANDROID_ID) ?: "collector"
-        val deviceName = Build.MODEL ?: "Android 采集端"
-        try {
-            DatagramSocket(DiscoveryProtocol.UDP_PORT).use { socket ->
-                discoverySocket = socket
-                val buffer = ByteArray(2048)
-                while (lifecycle.isRunning) {
-                    val request = DatagramPacket(buffer, buffer.size)
-                    socket.receive(request)
-                    val text = String(request.data, request.offset, request.length, Charsets.UTF_8)
-                    if (DiscoveryProtocol.decode(text) == DiscoveryPacket.Discover) {
-                        val response = DiscoveryProtocol.encode(
-                            DiscoveryPacket.Announce(
-                                deviceId = deviceId,
-                                deviceName = deviceName,
-                                hostAddress = localHostAddress(),
-                                tcpPort = CONTROL_PORT,
-                            ),
-                        ).toByteArray(Charsets.UTF_8)
-                        socket.send(DatagramPacket(response, response.size, request.address, request.port))
-                    }
-                }
-            }
-        } catch (_: SocketException) {
-            // Socket is closed during normal service shutdown.
-        }
     }
 
     private fun runControlServer() {
@@ -153,15 +125,19 @@ class CollectorForegroundService : Service() {
         try {
             ServerSocket(CONTROL_PORT).use { server ->
                 serverSocket = server
+                logNet("collector tcp listening port=$CONTROL_PORT deviceId=$deviceId name=$deviceName ips=${localIpv4Addresses()}")
                 while (lifecycle.isRunning) {
                     val socket = server.accept()
+                    logNet("collector tcp accepted remote=${socket.inetAddress?.hostAddress}:${socket.port}")
                     executor?.executeCatching {
                         handleClient(socket, deviceId, deviceName)
                     }
                 }
             }
         } catch (_: SocketException) {
-            // Socket is closed during normal service shutdown.
+            logNet("collector tcp server closed")
+        } catch (error: Throwable) {
+            logNetError( "collector tcp server failed: ${error.message}", error)
         }
     }
 
@@ -172,7 +148,11 @@ class CollectorForegroundService : Service() {
             val writer = client.getOutputStream().bufferedWriter(Charsets.UTF_8)
             val firstLine = reader.readLine()
             val message = firstLine?.let(ControlProtocol::decode)
-            if (message !is ControlMessage.ViewStart) return
+            if (message !is ControlMessage.ViewStart) {
+                logNet("collector tcp probe remote=${client.inetAddress?.hostAddress}:${client.port} firstLine=${firstLine?.take(80)}")
+                return
+            }
+            logNet("collector received ViewStart remote=${client.inetAddress?.hostAddress}:${client.port} udpPort=${message.udpPort}")
 
             val streamConfig = cameraStreamer?.streamConfig()
             val audioConfig = cameraStreamer?.audioConfig()
@@ -197,6 +177,7 @@ class CollectorForegroundService : Service() {
             )
             writer.newLine()
             writer.flush()
+            logNet("collector sent Hello remote=${client.inetAddress?.hostAddress}:${client.port} streamPort=$STREAM_PORT")
             cameraStreamer?.addClient(client.inetAddress, message.udpPort)
             client.soTimeout = 0
 
@@ -214,6 +195,16 @@ class CollectorForegroundService : Service() {
             runCatching(block)
         }
     }
+
+    private fun localIpv4Addresses(): String =
+        NetworkInterface.getNetworkInterfaces().toList()
+            .flatMap { networkInterface ->
+                networkInterface.inetAddresses.toList()
+                    .filter { address -> address is java.net.Inet4Address && !address.isLoopbackAddress }
+                    .map { address -> "${networkInterface.name}=${address.hostAddress}" }
+            }
+            .joinToString(",")
+            .ifBlank { "none" }
 
     private fun buildNotification(isCollecting: Boolean): Notification {
         val manager = getSystemService(NotificationManager::class.java)
@@ -256,22 +247,50 @@ class CollectorForegroundService : Service() {
         )
     }
 
-    private fun localHostAddress(): String {
-        val cm = applicationContext.getSystemService(Context.CONNECTIVITY_SERVICE) as? ConnectivityManager
-            ?: return "0.0.0.0"
-        val network = cm.activeNetwork ?: return "0.0.0.0"
-        val linkProperties = cm.getLinkProperties(network) ?: return "0.0.0.0"
-        return linkProperties.linkAddresses
-            .firstOrNull { it.address is java.net.Inet4Address }
-            ?.address?.hostAddress ?: "0.0.0.0"
-    }
-
     private fun sendStatusBroadcast(status: String, extraKey: String? = null, extraValue: String? = null) {
         val intent = Intent(ACTION_COLLECTOR_STATUS).apply {
             putExtra(EXTRA_STATUS, status)
             extraKey?.let { putExtra(it, extraValue ?: "") }
         }
         sendBroadcast(intent)
+    }
+
+    private fun acquireWifiLock() {
+        val wifiManager = applicationContext.getSystemService(Context.WIFI_SERVICE) as? WifiManager
+        wifiLock = wifiManager?.createWifiLock(
+            WifiManager.WIFI_MODE_FULL_HIGH_PERF,
+            "HomeCamera:Collector",
+        )
+        wifiLock?.acquire()
+    }
+
+    @SuppressLint("WakelockTimeout")
+    private fun acquireCpuWakeLock() {
+        val currentLock = cpuWakeLock
+        if (currentLock?.isHeld == true) return
+
+        val powerManager = getSystemService(Context.POWER_SERVICE) as PowerManager
+        cpuWakeLock = powerManager.newWakeLock(
+            PowerManager.PARTIAL_WAKE_LOCK,
+            "HomeCamera:CollectorCpu",
+        ).apply {
+            setReferenceCounted(false)
+            acquire()
+        }
+    }
+
+    private fun releaseCpuWakeLock() {
+        cpuWakeLock?.run {
+            if (isHeld) release()
+        }
+        cpuWakeLock = null
+    }
+
+    private fun releaseWifiLock() {
+        wifiLock?.run {
+            if (isHeld) release()
+        }
+        wifiLock = null
     }
 
     companion object {

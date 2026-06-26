@@ -10,6 +10,7 @@ enum class Screen {
     Collector,
     ClientList,
     Viewer,
+    LocalDebug,
 }
 
 enum class ServiceStatus {
@@ -84,6 +85,7 @@ data class HomeCameraState(
     val collector: CollectorState = CollectorState(),
     val client: ClientState = ClientState(),
     val viewer: ViewerState = ViewerState(),
+    val localDebug: ViewerState = ViewerState(),
 )
 
 sealed interface HomeCameraAction {
@@ -100,6 +102,9 @@ sealed interface HomeCameraAction {
     data class ViewerStatusChanged(val status: ViewerStatus, val errorMessage: String? = null) : HomeCameraAction
     data object BackToClientList : HomeCameraAction
     data object BackToRoleSelection : HomeCameraAction
+    data object EnterLocalDebug : HomeCameraAction
+    data object ExitLocalDebug : HomeCameraAction
+    data class LocalDebugStatusChanged(val status: ViewerStatus, val errorMessage: String? = null) : HomeCameraAction
 }
 
 object HomeCameraReducer {
@@ -205,5 +210,22 @@ object HomeCameraReducer {
             )
 
             HomeCameraAction.BackToRoleSelection -> HomeCameraState()
+
+            HomeCameraAction.EnterLocalDebug -> state.copy(
+                screen = Screen.LocalDebug,
+                localDebug = ViewerState(status = ViewerStatus.Connecting),
+            )
+
+            HomeCameraAction.ExitLocalDebug -> state.copy(
+                screen = Screen.RoleSelection,
+                localDebug = ViewerState(),
+            )
+
+            is HomeCameraAction.LocalDebugStatusChanged -> state.copy(
+                localDebug = state.localDebug.copy(
+                    status = action.status,
+                    errorMessage = action.errorMessage,
+                ),
+            )
         }
 }

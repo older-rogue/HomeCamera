@@ -14,7 +14,9 @@ class LanViewerConnector {
     fun connect(device: CollectorDevice, timeoutMillis: Int): ViewerConnection {
         val socket = Socket()
         try {
+            logNet("viewer connect start host=${device.hostAddress} port=${device.tcpPort} timeoutMs=$timeoutMillis")
             socket.connect(InetSocketAddress(device.hostAddress, device.tcpPort), timeoutMillis)
+            logNet("viewer connect tcp ok host=${device.hostAddress} port=${device.tcpPort}")
             socket.soTimeout = timeoutMillis
 
             val writer = socket.getOutputStream().bufferedWriter(Charsets.UTF_8)
@@ -28,12 +30,16 @@ class LanViewerConnector {
             )
             writer.newLine()
             writer.flush()
+            logNet("viewer sent ViewStart udpPort=$CLIENT_UDP_PORT")
 
             val reader = BufferedReader(InputStreamReader(socket.getInputStream(), Charsets.UTF_8))
             val response = ControlProtocol.decode(reader.readLine())
             require(response is ControlMessage.Hello) {
                 "Collector did not return HELLO"
             }
+            logNet(
+                "viewer received Hello deviceId=${response.deviceId} stream=${response.streamWidth}x${response.streamHeight} udpPort=${response.udpPort}",
+            )
             return ViewerConnection(
                 collectorDeviceId = response.deviceId,
                 collectorHostAddress = device.hostAddress,
@@ -52,6 +58,7 @@ class LanViewerConnector {
                 controlSocket = socket,
             )
         } catch (error: Throwable) {
+            logNetError("viewer connect failed host=${device.hostAddress} port=${device.tcpPort}: ${error.message}", error)
             socket.close()
             throw error
         }

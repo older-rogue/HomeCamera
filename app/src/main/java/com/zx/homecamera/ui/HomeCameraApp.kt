@@ -75,6 +75,8 @@ fun HomeCameraApp(
     viewerConnection: ViewerConnection? = null,
     onViewerSurfaceReady: (Surface) -> Unit = {},
     onViewerSurfaceDestroyed: () -> Unit = {},
+    onLocalDebugViewerSurfaceReady: (Surface) -> Unit = {},
+    onLocalDebugViewerSurfaceDestroyed: () -> Unit = {},
 ) {
     var collectorPreviewWidth by rememberSaveable(collectorInitialPreviewSize) {
         mutableStateOf(collectorInitialPreviewSize.width)
@@ -94,6 +96,19 @@ fun HomeCameraApp(
         }
     }
 
+    if (state.screen == Screen.Viewer) {
+        ViewerScreen(
+            modifier = Modifier.fillMaxSize(),
+            onAction = onAction,
+            displaySize = ViewerPreviewSize.displaySize(viewerConnection),
+            surfaceSize = ViewerPreviewSize.surfaceSize(viewerConnection),
+            rotationDegrees = ViewerPreviewSize.rotationDegrees(viewerConnection),
+            onSurfaceReady = onViewerSurfaceReady,
+            onSurfaceDestroyed = onViewerSurfaceDestroyed,
+        )
+        return
+    }
+
     Scaffold(
         topBar = {
             TopAppBar(
@@ -104,6 +119,7 @@ fun HomeCameraApp(
                             Screen.Collector -> "采集端"
                             Screen.ClientList -> "客户端"
                             Screen.Viewer -> "实时观看"
+                            Screen.LocalDebug -> "本地调试"
                         },
                     )
                 },
@@ -126,14 +142,15 @@ fun HomeCameraApp(
                     previewDisplaySize = collectorPreviewSize,
                 )
                 Screen.ClientList -> ClientListScreen(state.client, onAction)
-                Screen.Viewer -> ViewerScreen(
-                    state = state.viewer,
+                Screen.Viewer -> Unit
+                Screen.LocalDebug -> LocalDebugScreen(
+                    state = state.localDebug,
                     onAction = onAction,
-                    displaySize = ViewerPreviewSize.displaySize(viewerConnection),
-                    surfaceSize = ViewerPreviewSize.surfaceSize(viewerConnection),
-                    rotationDegrees = ViewerPreviewSize.rotationDegrees(viewerConnection),
-                    onSurfaceReady = onViewerSurfaceReady,
-                    onSurfaceDestroyed = onViewerSurfaceDestroyed,
+                    onCollectorSurfaceReady = onCollectorSurfaceReady,
+                    onCollectorSurfaceDestroyed = onCollectorSurfaceDestroyed,
+                    collectorPreviewSize = collectorPreviewSize,
+                    onViewerSurfaceReady = onLocalDebugViewerSurfaceReady,
+                    onViewerSurfaceDestroyed = onLocalDebugViewerSurfaceDestroyed,
                 )
             }
         }
@@ -164,6 +181,13 @@ private fun RoleSelectionScreen(onAction: (HomeCameraAction) -> Unit) {
             onClick = { onAction(HomeCameraAction.SelectRole(AppRole.Client)) },
         ) {
             Text("客户端")
+        }
+        Spacer(Modifier.height(12.dp))
+        OutlinedButton(
+            modifier = Modifier.fillMaxWidth(),
+            onClick = { onAction(HomeCameraAction.EnterLocalDebug) },
+        ) {
+            Text("本地调试")
         }
     }
 }
@@ -357,7 +381,7 @@ private fun ClientListScreen(
 
 @Composable
 private fun ViewerScreen(
-    state: ViewerState,
+    modifier: Modifier = Modifier,
     onAction: (HomeCameraAction) -> Unit,
     displaySize: VideoSize,
     surfaceSize: VideoSize,
@@ -365,45 +389,31 @@ private fun ViewerScreen(
     onSurfaceReady: (Surface) -> Unit,
     onSurfaceDestroyed: () -> Unit,
 ) {
-    Column(
-        modifier = Modifier.fillMaxSize(),
-        verticalArrangement = Arrangement.spacedBy(16.dp),
+    Box(
+        modifier = modifier.background(Color.Black),
     ) {
-        Box(
+        AndroidView(
+            modifier = Modifier.fillMaxSize(),
+            factory = { context ->
+                RotatedViewerTextureLayout(context).apply {
+                    updateConfig(surfaceSize, rotationDegrees)
+                    this.onSurfaceAvailable = onSurfaceReady
+                    this.onSurfaceDestroyed = onSurfaceDestroyed
+                }
+            },
+            update = { layout ->
+                layout.onSurfaceAvailable = onSurfaceReady
+                layout.onSurfaceDestroyed = onSurfaceDestroyed
+                layout.updateConfig(surfaceSize, rotationDegrees)
+            },
+        )
+        OutlinedButton(
             modifier = Modifier
-                .fillMaxWidth()
-                .aspectRatio(displaySize.width.toFloat() / displaySize.height.toFloat())
-                .background(Color.Black),
-            contentAlignment = Alignment.Center,
+                .align(Alignment.TopStart)
+                .padding(16.dp),
+            onClick = { onAction(HomeCameraAction.BackToClientList) },
         ) {
-            AndroidView(
-                modifier = Modifier.fillMaxSize(),
-                factory = { context ->
-                    RotatedViewerTextureLayout(context).apply {
-                        updateConfig(surfaceSize, rotationDegrees)
-                        this.onSurfaceAvailable = onSurfaceReady
-                        this.onSurfaceDestroyed = onSurfaceDestroyed
-                    }
-                },
-                update = { layout ->
-                    layout.onSurfaceAvailable = onSurfaceReady
-                    layout.onSurfaceDestroyed = onSurfaceDestroyed
-                    layout.updateConfig(surfaceSize, rotationDegrees)
-                },
-            )
-            if (state.status != ViewerStatus.Playing) {
-                Text(
-                    text = state.status.label(),
-                    color = Color.White,
-                    style = MaterialTheme.typography.titleMedium,
-                )
-            }
-        }
-        Text(text = state.selectedDevice?.name ?: "未选择采集端")
-        Text(text = state.selectedDevice?.hostAddress.orEmpty())
-        state.errorMessage?.let { Text(text = it, color = MaterialTheme.colorScheme.error) }
-        OutlinedButton(onClick = { onAction(HomeCameraAction.BackToClientList) }) {
-            Text("返回列表")
+            Text("返回")
         }
     }
 }
@@ -581,6 +591,111 @@ private fun ViewerStatus.label(): String =
         ViewerStatus.Reconnecting -> "重连中"
         ViewerStatus.Error -> "连接异常"
     }
+
+@Composable
+private fun LocalDebugScreen(
+    state: ViewerState,
+    onAction: (HomeCameraAction) -> Unit,
+    onCollectorSurfaceReady: (SurfaceHolder, Int, Int) -> Unit,
+    onCollectorSurfaceDestroyed: () -> Unit,
+    collectorPreviewSize: VideoSize,
+    onViewerSurfaceReady: (Surface) -> Unit,
+    onViewerSurfaceDestroyed: () -> Unit,
+) {
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .verticalScroll(rememberScrollState()),
+        verticalArrangement = Arrangement.spacedBy(8.dp),
+    ) {
+        Text(
+            text = "采集端预览",
+            style = MaterialTheme.typography.titleSmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+        Box(
+            modifier = Modifier
+                .fillMaxWidth()
+                .aspectRatio(collectorPreviewSize.width.toFloat() / collectorPreviewSize.height.toFloat())
+                .background(Color.Black),
+            contentAlignment = Alignment.Center,
+        ) {
+            AndroidView(
+                modifier = Modifier.fillMaxSize(),
+                factory = { context ->
+                    CenterCropSurfaceLayout(context).apply {
+                        onContainerChanged = { holder, width, height ->
+                            onCollectorSurfaceReady(holder, width, height)
+                        }
+                        surfaceView.holder.addCallback(
+                            object : SurfaceHolder.Callback {
+                                override fun surfaceCreated(holder: SurfaceHolder) {
+                                    onCollectorSurfaceReady(holder, this@apply.width, this@apply.height)
+                                }
+                                override fun surfaceChanged(holder: SurfaceHolder, format: Int, width: Int, height: Int) {
+                                    onCollectorSurfaceReady(holder, this@apply.width, this@apply.height)
+                                }
+                                override fun surfaceDestroyed(holder: SurfaceHolder) {
+                                    onCollectorSurfaceDestroyed()
+                                }
+                            },
+                        )
+                    }
+                },
+                update = { layout ->
+                    layout.updatePreviewSize(collectorPreviewSize.width, collectorPreviewSize.height)
+                },
+            )
+        }
+
+        Text(
+            text = "客户端画面",
+            style = MaterialTheme.typography.titleSmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+        Box(
+            modifier = Modifier
+                .fillMaxWidth()
+                .aspectRatio(3f / 4f)
+                .background(Color.Black),
+            contentAlignment = Alignment.Center,
+        ) {
+            val displaySize = VideoSize(480, 640)
+            val surfaceSize = VideoSize(640, 480)
+            AndroidView(
+                modifier = Modifier.fillMaxSize(),
+                factory = { context ->
+                    RotatedViewerTextureLayout(context).apply {
+                        updateConfig(surfaceSize, 0f)
+                        this.onSurfaceAvailable = onViewerSurfaceReady
+                        this.onSurfaceDestroyed = onViewerSurfaceDestroyed
+                    }
+                },
+                update = { layout ->
+                    layout.onSurfaceAvailable = onViewerSurfaceReady
+                    layout.onSurfaceDestroyed = onViewerSurfaceDestroyed
+                    layout.updateConfig(surfaceSize, 0f)
+                },
+            )
+            if (state.status != ViewerStatus.Playing) {
+                Text(
+                    text = state.status.label(),
+                    color = Color.White,
+                    style = MaterialTheme.typography.titleMedium,
+                )
+            }
+        }
+
+        Text(text = "状态: ${state.status.label()}")
+        state.errorMessage?.let { Text(text = it, color = MaterialTheme.colorScheme.error) }
+
+        Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+            OutlinedButton(onClick = { onAction(HomeCameraAction.ExitLocalDebug) }) {
+                Text("退出调试")
+            }
+        }
+    }
+}
 
 @Preview(showBackground = true)
 @Composable

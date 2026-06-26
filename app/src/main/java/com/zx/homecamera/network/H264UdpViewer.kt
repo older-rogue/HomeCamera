@@ -120,13 +120,19 @@ class H264UdpViewer {
             var completedVideoFrames = 0L
             var completedAudioFrames = 0L
             var lastStatsLogAtMillis = System.currentTimeMillis()
+            var lastPacketAtNanos = System.nanoTime()
+            var incompleteFragments = 0L
             while (running.get()) {
                 val packet = DatagramPacket(buffer, buffer.size)
                 try {
                     udpSocket.receive(packet)
+                    val packetNanos = System.nanoTime()
+                    val packetIntervalMs = (packetNanos - lastPacketAtNanos) / 1_000_000.0
+                    lastPacketAtNanos = packetNanos
                     lastPacketAtMillis.set(System.currentTimeMillis())
                     val streamPacket = MediaUdpPacket.decode(packet.data, packet.length) ?: continue
-                    val frame = reassembler.accept(streamPacket) ?: continue
+                    val frame = reassembler.accept(streamPacket)
+                    if (frame == null) { incompleteFragments++; continue }
                     when (frame.track) {
                         MediaTrack.Video -> if (frame.codec == MediaCodecType.H264) {
                             completedVideoFrames++
@@ -138,11 +144,15 @@ class H264UdpViewer {
                             offerLatestAudioFrame(audioQueue, frame)
                         }
                     }
+                    if (packetIntervalMs > 50.0) {
+                        Log.w(TAG, "udp recv gap: %.0fms".format(packetIntervalMs))
+                    }
                     val now = System.currentTimeMillis()
                     if (now - lastStatsLogAtMillis >= STATS_LOG_INTERVAL_MILLIS) {
-                        Log.i(TAG, "udp receiver: video=$completedVideoFrames audio=$completedAudioFrames")
+                        Log.i(TAG, "udp receiver: video=$completedVideoFrames audio=$completedAudioFrames incomplete=$incompleteFragments")
                         completedVideoFrames = 0L
                         completedAudioFrames = 0L
+                        incompleteFragments = 0L
                         lastStatsLogAtMillis = now
                     }
                 } catch (_: SocketTimeoutException) {
@@ -175,16 +185,25 @@ class H264UdpViewer {
         var queuedInputFrames = 0L
         var renderedFrames = 0L
         var lastStatsLogAtMillis = System.currentTimeMillis()
+        var lastRenderAtNanos = System.nanoTime()
         while (running.get()) {
             val frame = videoQueue.poll(VIDEO_QUEUE_POLL_TIMEOUT_MILLIS)
             if (frame != null) {
                 if (queueVideoFrame(codec, frame.data, frame.timestampMicros, frame.flags)) {
                     queuedInputFrames++
+                } else {
+                    Log.w(TAG, "decoder input buffer full, frame dropped")
                 }
             }
             val drainedFrames = drainVideoDecoder(codec)
             if (drainedFrames > 0) {
+                val renderNanos = System.nanoTime()
+                val renderIntervalMs = (renderNanos - lastRenderAtNanos) / 1_000_000.0
+                lastRenderAtNanos = renderNanos
                 renderedFrames += drainedFrames
+                if (renderIntervalMs > 100.0) {
+                    Log.w(TAG, "render gap: %.0fms drained=$drainedFrames".format(renderIntervalMs))
+                }
             }
             if (drainedFrames > 0 && !firstFrameRendered) {
                 firstFrameRendered = true

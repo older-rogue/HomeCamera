@@ -4,20 +4,27 @@ import android.Manifest
 import android.os.Build
 import android.os.Bundle
 import android.view.Surface
+import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.platform.LocalContext
+import androidx.core.view.WindowCompat
+import androidx.core.view.WindowInsetsCompat
+import androidx.core.view.WindowInsetsControllerCompat
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.zx.homecamera.core.app.HomeCameraAction
+import com.zx.homecamera.core.app.Screen
+import com.zx.homecamera.core.app.ViewerStatus
 import com.zx.homecamera.ui.HomeCameraApp
 import com.zx.homecamera.ui.theme.HomeCameraTheme
 import com.zx.homecamera.video.CameraH264Streamer
@@ -54,6 +61,26 @@ class MainActivity : ComponentActivity() {
             DisposableEffect(Unit) {
                 viewModel.setDisplayRotationDegrees(displayRotationDegrees())
                 onDispose {}
+            }
+
+            DisposableEffect(state.screen == Screen.Viewer) {
+                val controller = WindowCompat.getInsetsController(window, window.decorView)
+                if (state.screen == Screen.Viewer) {
+                    controller.systemBarsBehavior = WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
+                    controller.hide(WindowInsetsCompat.Type.systemBars())
+                } else {
+                    controller.show(WindowInsetsCompat.Type.systemBars())
+                }
+                onDispose {
+                    controller.show(WindowInsetsCompat.Type.systemBars())
+                }
+            }
+
+            LaunchedEffect(state.screen, state.viewer.status, state.viewer.errorMessage) {
+                if (state.screen == Screen.Viewer && state.viewer.status == ViewerStatus.Error) {
+                    Toast.makeText(context, state.viewer.errorMessage ?: "连接失败", Toast.LENGTH_SHORT).show()
+                    viewModel.onAction(HomeCameraAction.BackToClientList)
+                }
             }
 
             val permissionLauncher = rememberLauncherForActivityResult(
@@ -103,6 +130,12 @@ class MainActivity : ComponentActivity() {
                     },
                     onViewerSurfaceDestroyed = {
                         viewModel.onViewerSurfaceDestroyed()
+                    },
+                    onLocalDebugViewerSurfaceReady = { surface ->
+                        viewModel.startLocalDebugSession(surface)
+                    },
+                    onLocalDebugViewerSurfaceDestroyed = {
+                        viewModel.stopLocalDebugSession()
                     },
                 )
             }
