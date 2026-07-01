@@ -83,4 +83,31 @@ class HomeCameraReducerTest {
         assertNull(result.viewer.selectedDevice)
         assertEquals(ViewerStatus.Idle, result.viewer.status)
     }
+
+    @Test
+    fun recordingFailureDoesNotFailRunningCollectorService() {
+        val running = HomeCameraState(
+            collector = CollectorState(
+                serviceStatus = ServiceStatus.Running,
+                recordingStatus = RecordingStatus.Recording,
+            ),
+        )
+
+        val result = HomeCameraReducer.reduce(running, HomeCameraAction.RecordingFailed("磁盘已满"))
+
+        assertEquals(ServiceStatus.Running, result.collector.serviceStatus)
+        assertEquals(RecordingStatus.Error, result.collector.recordingStatus)
+        assertEquals("磁盘已满", result.collector.errorMessage)
+    }
+
+    @Test
+    fun clientCountChangedUpdatesConnectionStatus() {
+        val connected = HomeCameraReducer.reduce(HomeCameraState(), HomeCameraAction.ClientCountChanged(2))
+        val disconnected = HomeCameraReducer.reduce(connected, HomeCameraAction.ClientCountChanged(0))
+
+        assertEquals(2, connected.collector.connectedClientCount)
+        assertEquals(ConnectionStatus.Connected, connected.collector.connectionStatus)
+        assertEquals(0, disconnected.collector.connectedClientCount)
+        assertEquals(ConnectionStatus.NoClient, disconnected.collector.connectionStatus)
+    }
 }

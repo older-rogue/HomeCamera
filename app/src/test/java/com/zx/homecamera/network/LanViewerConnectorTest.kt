@@ -7,6 +7,7 @@ import java.io.BufferedReader
 import java.io.InputStreamReader
 import java.net.ServerSocket
 import java.util.concurrent.Executors
+import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -21,6 +22,8 @@ class LanViewerConnectorTest {
                     val reader = BufferedReader(InputStreamReader(socket.getInputStream(), Charsets.UTF_8))
                     val request = ControlProtocol.decode(reader.readLine())
                     assertTrue(request is ControlMessage.ViewStart)
+                    require(request is ControlMessage.ViewStart)
+                    assertTrue(request.udpPort in 1..65535)
 
                     val writer = socket.getOutputStream().bufferedWriter(Charsets.UTF_8)
                     writer.write(
@@ -61,6 +64,9 @@ class LanViewerConnectorTest {
             assertEquals(20, result.streamFps)
             assertEquals("127.0.0.1", result.collectorHostAddress)
             assertEquals(server.localPort, result.collectorTcpPort)
+            assertNotNull(result.udpSocket)
+            assertTrue(result.udpSocket?.localPort in 1..65535)
+            result.close()
             executor.shutdownNow()
         }
     }

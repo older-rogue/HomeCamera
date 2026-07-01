@@ -92,6 +92,57 @@ class MediaUdpPacketTest {
     }
 
     @Test
+    fun encodeFrameRejectsFrameAboveMaxSize() {
+        val frame = ByteArray(MediaUdpPacket.MAX_FRAME_SIZE_BYTES + 1)
+
+        val error = runCatching {
+            MediaUdpPacket.encodeFrame(
+                track = MediaTrack.Video,
+                codec = MediaCodecType.H264,
+                sequenceNumber = 1,
+                timestampMicros = 1L,
+                flags = 0,
+                data = frame,
+            )
+        }.exceptionOrNull()
+
+        assertNotNull(error)
+    }
+
+    @Test
+    fun encodeFrameRejectsDatagramAboveProtocolLimit() {
+        val error = runCatching {
+            MediaUdpPacket.encodeFrame(
+                track = MediaTrack.Video,
+                codec = MediaCodecType.H264,
+                sequenceNumber = 1,
+                timestampMicros = 1L,
+                flags = 0,
+                data = byteArrayOf(1),
+                maxDatagramSize = MediaUdpPacket.MAX_DATAGRAM_SIZE_BYTES + 1,
+            )
+        }.exceptionOrNull()
+
+        assertNotNull(error)
+    }
+
+    @Test
+    fun decodeRejectsFragmentCountAboveLimit() {
+        val datagram = MediaUdpPacket.encodeFrame(
+            track = MediaTrack.Video,
+            codec = MediaCodecType.H264,
+            sequenceNumber = 1,
+            timestampMicros = 1L,
+            flags = 0,
+            data = byteArrayOf(1),
+        ).single()
+        datagram[24] = ((MediaUdpPacket.MAX_FRAGMENTS_PER_FRAME + 1) shr 8).toByte()
+        datagram[25] = ((MediaUdpPacket.MAX_FRAGMENTS_PER_FRAME + 1) and 0xff).toByte()
+
+        assertNull(MediaUdpPacket.decode(datagram))
+    }
+
+    @Test
     fun rejectsInvalidDatagram() {
         val invalid = ByteArray(32) { 1 }
 

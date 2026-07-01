@@ -20,15 +20,15 @@ class CollectorServiceLifecycleTest {
     }
 
     @Test
-    fun currentStopReleasesCollectorWithoutStoppingService() {
+    fun currentStopReleasesCollectorAndStopsService() {
         val lifecycle = CollectorServiceLifecycle()
         lifecycle.onStart(startId = 1)
 
         val stop = lifecycle.onStop(startId = 1)
 
         assertTrue(stop.shouldReleaseResources)
-        assertFalse(stop.shouldRequestServiceStop)
-        assertTrue(stop.shouldKeepServiceForeground)
+        assertTrue(stop.shouldRequestServiceStop)
+        assertFalse(stop.shouldKeepServiceForeground)
         assertFalse(stop.isRunning)
     }
 

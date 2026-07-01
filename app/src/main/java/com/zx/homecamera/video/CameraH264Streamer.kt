@@ -39,6 +39,7 @@ import java.util.concurrent.atomic.AtomicInteger
 class CameraH264Streamer(
     private val context: Context,
     recordingRoot: File? = context.getExternalFilesDir(null)?.resolve("recordings"),
+    private val onRecordingError: (Throwable) -> Unit = {},
 ) {
     private val running = AtomicBoolean(false)
     private val sequenceNumber = AtomicInteger(0)
@@ -77,9 +78,14 @@ class CameraH264Streamer(
     private var realtimeSender: RealtimeUdpSender? = null
     @Volatile
     private var latestCodecConfig: ByteArray? = null
+    @Volatile
     private var latestAudioCodecConfig: ByteArray? = null
+    @Volatile
+    private var activeAudioConfig: AacAudioConfig = AacAudioConfig.Default.copy(enabled = false)
     private var audioStreamer: AacAudioStreamer? = null
-    private val recorder = recordingRoot?.let(::Mp4SegmentRecorder)
+    private val recorder = recordingRoot?.let { root ->
+        Mp4SegmentRecorder(root, onError = onRecordingError)
+    }
 
     fun start() {
         if (!running.compareAndSet(false, true)) return
@@ -87,11 +93,9 @@ class CameraH264Streamer(
             running.set(false)
             throw SecurityException("Camera permission is required")
         }
-        if (ContextCompat.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
-            running.set(false)
-            throw SecurityException("Microphone permission is required")
-        }
 
+        activeAudioConfig = AacAudioConfig.Default.copy(enabled = false)
+        latestAudioCodecConfig = null
         cameraThread = HandlerThread("camera-h264-streamer").also { thread ->
             thread.start()
             cameraHandler = Handler(thread.looper)
@@ -133,7 +137,9 @@ class CameraH264Streamer(
         encoder = null
         audioStreamer?.stop()
         audioStreamer = null
+        latestCodecConfig = null
         latestAudioCodecConfig = null
+        activeAudioConfig = AacAudioConfig.Default.copy(enabled = false)
         recorder?.stop()
         realtimeSender?.stop()
         realtimeSender = null
@@ -167,6 +173,12 @@ class CameraH264Streamer(
         requestKeyFrame()
     }
 
+    fun removeClient(address: InetAddress, udpPort: Int) {
+        clients.remove(StreamClient(address, udpPort))
+    }
+
+    fun clientCount(): Int = clients.size
+
     fun setPreviewSurface(holder: SurfaceHolder?, width: Int = 0, height: Int = 0) {
         previewHolder = holder?.takeIf { it.surface?.isValid == true }
         previewTargetSize = VideoSize(width, height)
@@ -198,8 +210,7 @@ class CameraH264Streamer(
 
     fun streamConfig(): H264StreamSelection = streamSelection
 
-    fun audioConfig(): AacAudioConfig =
-        audioStreamer?.config ?: AacAudioConfig.Default
+    fun audioConfig(): AacAudioConfig = activeAudioConfig
 
     private fun startEncoder() {
         val selection = streamSelection
@@ -437,7 +448,16 @@ class CameraH264Streamer(
     }
 
     private fun startAudioStreamer() {
-        audioStreamer = AacAudioStreamer(context).also { streamer ->
+        if (ContextCompat.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
+            Log.i(TAG, "Microphone permission not granted; video-only streaming enabled")
+            activeAudioConfig = AacAudioConfig.Default.copy(enabled = false)
+            latestAudioCodecConfig = null
+            return
+        }
+
+        val streamer = AacAudioStreamer(context)
+        audioStreamer = streamer
+        runCatching {
             streamer.start(
                 onEvent = { event ->
                     when (event) {
@@ -445,6 +465,7 @@ class CameraH264Streamer(
                         is EncodedAudioEvent.Sample -> {
                             if (event.flags and MediaUdpPacket.FLAG_CODEC_CONFIG != 0) {
                                 latestAudioCodecConfig = event.data
+                                activeAudioConfig = streamer.config.copy(enabled = true)
                             }
                             sendAudioFrame(event.data, event.flags, event.timestampMicros)
                         }
@@ -452,9 +473,19 @@ class CameraH264Streamer(
                 },
                 onError = { error ->
                     Log.w(TAG, "Audio streaming stopped after capture or encode failure", error)
-                    // Keep video streaming if audio capture fails after collector startup.
+                    latestAudioCodecConfig = null
+                    activeAudioConfig = streamer.config.copy(enabled = false)
+                    audioStreamer = null
                 },
             )
+        }.onSuccess {
+            activeAudioConfig = streamer.config.copy(enabled = true)
+        }.onFailure { error ->
+            Log.w(TAG, "Audio streaming disabled during startup", error)
+            streamer.stop()
+            if (audioStreamer == streamer) audioStreamer = null
+            latestAudioCodecConfig = null
+            activeAudioConfig = streamer.config.copy(enabled = false)
         }
     }
 

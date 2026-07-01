@@ -46,6 +46,7 @@ class HomeCameraViewModel(application: Application) : AndroidViewModel(applicati
     private val viewerExecutor = Executors.newSingleThreadExecutor()
     private val viewerStream = H264UdpViewer()
     private val scanGeneration = AtomicLong()
+    private val viewerGeneration = AtomicLong()
     private var scanFuture: Future<*>? = null
     private var localDebugSession: LocalDebugSession? = null
     private var wifiLock: WifiManager.WifiLock? = null
@@ -62,6 +63,7 @@ class HomeCameraViewModel(application: Application) : AndroidViewModel(applicati
             if (intent.action != CollectorForegroundService.ACTION_COLLECTOR_STATUS) return
             val status = intent.getStringExtra(CollectorForegroundService.EXTRA_STATUS) ?: return
             val message = intent.getStringExtra(CollectorForegroundService.EXTRA_MESSAGE)
+            val clientCount = intent.getStringExtra(CollectorForegroundService.EXTRA_CLIENT_COUNT)?.toIntOrNull()
             viewModelScope.launch {
                 when (status) {
                     CollectorForegroundService.STATUS_RUNNING -> {
@@ -82,6 +84,18 @@ class HomeCameraViewModel(application: Application) : AndroidViewModel(applicati
                             HomeCameraAction.StopCollector,
                         )
                     }
+                    CollectorForegroundService.STATUS_RECORDING_ERROR -> {
+                        _state.value = HomeCameraReducer.reduce(
+                            _state.value,
+                            HomeCameraAction.RecordingFailed(message ?: "录像写入失败"),
+                        )
+                    }
+                }
+                clientCount?.let { count ->
+                    _state.value = HomeCameraReducer.reduce(
+                        _state.value,
+                        HomeCameraAction.ClientCountChanged(count),
+                    )
                 }
             }
         }
@@ -124,6 +138,7 @@ class HomeCameraViewModel(application: Application) : AndroidViewModel(applicati
 
             is HomeCameraAction.OpenViewer -> {
                 cancelScan()
+                viewerGeneration.incrementAndGet()
                 viewerStream.stop()
         releaseWifiLock()
                 viewerConnection = null
@@ -135,6 +150,7 @@ class HomeCameraViewModel(application: Application) : AndroidViewModel(applicati
             }
 
             HomeCameraAction.BackToClientList -> {
+                viewerGeneration.incrementAndGet()
                 viewerStream.stop()
         releaseWifiLock()
                 viewerConnection = null
@@ -145,6 +161,7 @@ class HomeCameraViewModel(application: Application) : AndroidViewModel(applicati
 
             HomeCameraAction.BackToRoleSelection -> {
                 cancelScan()
+                viewerGeneration.incrementAndGet()
                 viewerStream.stop()
         releaseWifiLock()
                 viewerConnection = null
@@ -186,6 +203,7 @@ class HomeCameraViewModel(application: Application) : AndroidViewModel(applicati
     }
 
     fun onViewerSurfaceDestroyed() {
+        viewerGeneration.incrementAndGet()
         viewerSurface = null
         viewerStream.stop()
         releaseWifiLock()
@@ -218,25 +236,39 @@ class HomeCameraViewModel(application: Application) : AndroidViewModel(applicati
         localDebugSession?.stop()
         val session = LocalDebugSession(getApplication())
         localDebugSession = session
-        session.start(
-            viewerSurface = surface,
-            onFirstFrame = {
-                viewModelScope.launch {
-                    _state.value = HomeCameraReducer.reduce(
-                        _state.value,
-                        HomeCameraAction.LocalDebugStatusChanged(ViewerStatus.Playing),
-                    )
-                }
-            },
-            onError = { message ->
-                viewModelScope.launch {
-                    _state.value = HomeCameraReducer.reduce(
-                        _state.value,
-                        HomeCameraAction.LocalDebugStatusChanged(ViewerStatus.Error, message),
-                    )
-                }
-            },
-        )
+        runCatching {
+            session.start(
+                viewerSurface = surface,
+                onFirstFrame = {
+                    viewModelScope.launch {
+                        _state.value = HomeCameraReducer.reduce(
+                            _state.value,
+                            HomeCameraAction.LocalDebugStatusChanged(ViewerStatus.Playing),
+                        )
+                    }
+                },
+                onError = { message ->
+                    viewModelScope.launch {
+                        _state.value = HomeCameraReducer.reduce(
+                            _state.value,
+                            HomeCameraAction.LocalDebugStatusChanged(ViewerStatus.Error, message),
+                        )
+                    }
+                },
+            )
+        }.onFailure { error ->
+            if (localDebugSession == session) {
+                session.stop()
+                localDebugSession = null
+            }
+            _state.value = HomeCameraReducer.reduce(
+                _state.value,
+                HomeCameraAction.LocalDebugStatusChanged(
+                    ViewerStatus.Error,
+                    error.message ?: "本地调试启动失败",
+                ),
+            )
+        }
     }
 
     fun stopLocalDebugSession() {
@@ -302,7 +334,12 @@ class HomeCameraViewModel(application: Application) : AndroidViewModel(applicati
     }
 
     private fun connectViewerStream(device: CollectorDevice, maxAttempts: Int = 1) {
+        val generation = viewerGeneration.get()
         connectViewer(device, maxAttempts) { connection, message ->
+            if (!isViewerGenerationActive(generation, device)) {
+                connection?.close()
+                return@connectViewer
+            }
             if (connection == null) {
                 _state.value = HomeCameraReducer.reduce(
                     _state.value,
@@ -310,16 +347,17 @@ class HomeCameraViewModel(application: Application) : AndroidViewModel(applicati
                 )
             } else {
                 viewerConnection = connection
-                startViewerStreamIfReady()
+                startViewerStreamIfReady(generation)
             }
         }
     }
 
-    private fun startViewerStreamIfReady() {
+    private fun startViewerStreamIfReady(generation: Long = viewerGeneration.get()) {
         val connection = viewerConnection
         val surface = viewerSurface
         if (connection != null && surface != null && surface.isValid) {
-            val streamKey = "${connection.collectorDeviceId}:${surface.hashCode()}"
+            if (!isViewerGenerationActive(generation, _state.value.viewer.selectedDevice)) return
+            val streamKey = "$generation:${connection.collectorDeviceId}:${surface.hashCode()}"
             if (viewerStreamKey == streamKey) return
             acquireWifiLock()
             viewerStreamKey = streamKey
@@ -328,6 +366,7 @@ class HomeCameraViewModel(application: Application) : AndroidViewModel(applicati
                 surface = surface,
                 onFirstFrame = {
                     viewModelScope.launch {
+                        if (!isViewerGenerationActive(generation, connection)) return@launch
                         _state.value = HomeCameraReducer.reduce(
                             _state.value,
                             HomeCameraAction.ViewerStatusChanged(ViewerStatus.Playing),
@@ -336,16 +375,22 @@ class HomeCameraViewModel(application: Application) : AndroidViewModel(applicati
                 },
                 onError = { message ->
                     viewModelScope.launch {
+                        if (!isViewerGenerationActive(generation, connection)) return@launch
                         viewerStream.stop()
-        releaseWifiLock()
+                        releaseWifiLock()
                         viewerConnection = null
                         viewerStreamKey = null
                         _state.value = HomeCameraReducer.reduce(
                             _state.value,
                             HomeCameraAction.ViewerStatusChanged(ViewerStatus.Reconnecting, message),
                         )
+                        val reconnectGeneration = viewerGeneration.get()
                         _state.value.viewer.selectedDevice?.let { device ->
                             connectViewer(device, maxAttempts = 5) { reconnected, reconnectMessage ->
+                                if (!isViewerGenerationActive(reconnectGeneration, device)) {
+                                    reconnected?.close()
+                                    return@connectViewer
+                                }
                                 if (reconnected == null) {
                                     _state.value = HomeCameraReducer.reduce(
                                         _state.value,
@@ -356,7 +401,7 @@ class HomeCameraViewModel(application: Application) : AndroidViewModel(applicati
                                     )
                                 } else {
                                     viewerConnection = reconnected
-                                    startViewerStreamIfReady()
+                                    startViewerStreamIfReady(reconnectGeneration)
                                 }
                             }
                         }
@@ -365,6 +410,14 @@ class HomeCameraViewModel(application: Application) : AndroidViewModel(applicati
             )
         }
     }
+
+    private fun isViewerGenerationActive(generation: Long, device: CollectorDevice?): Boolean =
+        viewerGeneration.get() == generation &&
+            _state.value.viewer.selectedDevice?.deviceId == device?.deviceId
+
+    private fun isViewerGenerationActive(generation: Long, connection: ViewerConnection): Boolean =
+        viewerGeneration.get() == generation &&
+            _state.value.viewer.selectedDevice?.deviceId == connection.collectorDeviceId
 
     private fun connectViewer(
         device: CollectorDevice,
@@ -393,6 +446,7 @@ class HomeCameraViewModel(application: Application) : AndroidViewModel(applicati
     }
 
     override fun onCleared() {
+        viewerGeneration.incrementAndGet()
         cancelScan()
         viewerStream.stop()
         releaseWifiLock()

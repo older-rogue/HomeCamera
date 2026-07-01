@@ -30,7 +30,7 @@ class CollectorServiceLifecycle {
         running = false
         return Decision(
             shouldReleaseResources = shouldReleaseResources,
-            shouldKeepServiceForeground = true,
+            shouldRequestServiceStop = true,
             isRunning = running,
         )
     }

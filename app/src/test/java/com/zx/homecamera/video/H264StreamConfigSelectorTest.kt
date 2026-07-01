@@ -49,7 +49,7 @@ class H264StreamConfigSelectorTest {
             displayRotationDegrees = 0,
         )
 
-        assertEquals(20, config.fps)
+        assertEquals(15, config.fps)
         assertEquals(2_400_000, config.bitrate)
         assertEquals(H264StreamConfig.I_FRAME_INTERVAL_SECONDS, config.iFrameIntervalSeconds)
     }

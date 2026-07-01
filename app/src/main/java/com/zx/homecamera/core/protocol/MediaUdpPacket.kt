@@ -48,6 +48,9 @@ object MediaUdpPacket {
     const val FLAG_KEY_FRAME = 1
     const val FLAG_CODEC_CONFIG = 1 shl 1
     const val DEFAULT_MAX_DATAGRAM_SIZE = 1_200
+    const val MAX_DATAGRAM_SIZE_BYTES = DEFAULT_MAX_DATAGRAM_SIZE
+    const val MAX_FRAGMENTS_PER_FRAME = 1_024
+    const val MAX_FRAME_SIZE_BYTES = 2 * 1024 * 1024
 
     private const val MAGIC = 0x48434d46 // HCMF
     private const val VERSION = 1
@@ -64,11 +67,14 @@ object MediaUdpPacket {
         maxDatagramSize: Int = DEFAULT_MAX_DATAGRAM_SIZE,
     ): List<ByteArray> {
         require(maxDatagramSize > HEADER_SIZE) { "maxDatagramSize must leave room for payload" }
+        require(maxDatagramSize <= MAX_DATAGRAM_SIZE_BYTES) { "maxDatagramSize exceeds protocol limit" }
         require(data.isNotEmpty()) { "data must not be empty" }
+        require(data.size <= MAX_FRAME_SIZE_BYTES) { "frame exceeds protocol size limit" }
 
         val maxPayloadSize = maxDatagramSize - HEADER_SIZE
+        require(maxPayloadSize <= MAX_UNSIGNED_SHORT) { "payload size exceeds protocol field limit" }
         val fragmentCount = (data.size + maxPayloadSize - 1) / maxPayloadSize
-        require(fragmentCount <= MAX_UNSIGNED_SHORT) { "frame is too large to fragment" }
+        require(fragmentCount <= MAX_FRAGMENTS_PER_FRAME) { "frame has too many fragments" }
 
         return List(fragmentCount) { index ->
             val offset = index * maxPayloadSize
@@ -91,7 +97,7 @@ object MediaUdpPacket {
     }
 
     fun decode(datagram: ByteArray, length: Int = datagram.size): MediaPacket? {
-        if (length < HEADER_SIZE || datagram.size < length) return null
+        if (length < HEADER_SIZE || datagram.size < length || length > MAX_DATAGRAM_SIZE_BYTES) return null
         val buffer = ByteBuffer.wrap(datagram, 0, length).order(ByteOrder.BIG_ENDIAN)
         if (buffer.int != MAGIC) return null
         if (buffer.get().toInt() != VERSION) return null
@@ -104,7 +110,7 @@ object MediaUdpPacket {
         val fragmentIndex = buffer.short.toInt() and 0xffff
         val fragmentCount = buffer.short.toInt() and 0xffff
         val payloadLength = buffer.short.toInt() and 0xffff
-        if (fragmentCount <= 0 || fragmentIndex >= fragmentCount) return null
+        if (fragmentCount <= 0 || fragmentCount > MAX_FRAGMENTS_PER_FRAME || fragmentIndex >= fragmentCount) return null
         if (payloadLength != length - HEADER_SIZE) return null
 
         val payload = ByteArray(payloadLength)
@@ -142,7 +148,10 @@ class MediaFrameReassembler(
                 fragmentCount = packet.fragmentCount,
             )
         }
-        if (!frame.accept(packet)) return null
+        if (!frame.accept(packet)) {
+            pending.remove(key)
+            return null
+        }
 
         trimOldFrames()
         if (!frame.isComplete()) return null
@@ -180,11 +189,17 @@ class MediaFrameReassembler(
         val fragmentCount: Int,
     ) {
         private val fragments = arrayOfNulls<ByteArray>(fragmentCount)
+        private var payloadBytes = 0
 
         fun accept(packet: MediaPacket): Boolean {
             if (packet.track != track) return false
             if (packet.codec != codec) return false
             if (packet.fragmentCount != fragmentCount) return false
+            val previous = fragments[packet.fragmentIndex]
+            if (previous == null) {
+                payloadBytes += packet.payload.size
+                if (payloadBytes > MediaUdpPacket.MAX_FRAME_SIZE_BYTES) return false
+            }
             fragments[packet.fragmentIndex] = packet.payload
             return true
         }

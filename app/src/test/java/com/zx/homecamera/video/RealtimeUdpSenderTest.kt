@@ -89,6 +89,97 @@ class RealtimeUdpSenderTest {
     }
 
     @Test
+    fun boundedQueueKeepsVideoCodecConfigWhenDroppingFrames() {
+        val sender = RealtimeUdpSender(
+            clients = { listOf(StreamDestination("127.0.0.1", 62011)) },
+            socket = FakeUdpSocket(),
+            queueCapacity = 3,
+            packetPacingMicros = 0L,
+            sleeper = {},
+        )
+
+        sender.offer(frame(sequenceNumber = 1, flags = RealtimeUdpSender.FLAG_CODEC_CONFIG))
+        sender.offer(frame(sequenceNumber = 2))
+        sender.offer(frame(sequenceNumber = 3))
+        sender.offer(frame(sequenceNumber = 4))
+
+        assertEquals(listOf(1, 3, 4), sender.drainQueuedForTest().map { it.sequenceNumber })
+    }
+
+    @Test
+    fun boundedQueueKeepsAudioCodecConfigWhenDroppingFrames() {
+        val sender = RealtimeUdpSender(
+            clients = { listOf(StreamDestination("127.0.0.1", 62011)) },
+            socket = FakeUdpSocket(),
+            queueCapacity = 3,
+            packetPacingMicros = 0L,
+            sleeper = {},
+        )
+
+        sender.offer(
+            frame(
+                sequenceNumber = 1,
+                track = MediaTrack.Audio,
+                codec = MediaCodecType.Aac,
+                flags = RealtimeUdpSender.FLAG_CODEC_CONFIG,
+            ),
+        )
+        sender.offer(frame(sequenceNumber = 2))
+        sender.offer(frame(sequenceNumber = 3))
+        sender.offer(frame(sequenceNumber = 4))
+
+        assertEquals(listOf(1, 3, 4), sender.drainQueuedForTest().map { it.sequenceNumber })
+    }
+
+    @Test
+    fun fullProtectedQueueDropsIncomingDroppableFrame() {
+        val sender = RealtimeUdpSender(
+            clients = { listOf(StreamDestination("127.0.0.1", 62011)) },
+            socket = FakeUdpSocket(),
+            queueCapacity = 2,
+            packetPacingMicros = 0L,
+            sleeper = {},
+        )
+
+        sender.offer(frame(sequenceNumber = 1, flags = RealtimeUdpSender.FLAG_CODEC_CONFIG))
+        sender.offer(
+            frame(
+                sequenceNumber = 2,
+                track = MediaTrack.Audio,
+                codec = MediaCodecType.Aac,
+                flags = RealtimeUdpSender.FLAG_CODEC_CONFIG,
+            ),
+        )
+        sender.offer(frame(sequenceNumber = 3))
+
+        assertEquals(listOf(1, 2), sender.drainQueuedForTest().map { it.sequenceNumber })
+    }
+
+    @Test
+    fun incomingCodecConfigReplacesOlderSameTrackConfigWhenQueueIsProtected() {
+        val sender = RealtimeUdpSender(
+            clients = { listOf(StreamDestination("127.0.0.1", 62011)) },
+            socket = FakeUdpSocket(),
+            queueCapacity = 2,
+            packetPacingMicros = 0L,
+            sleeper = {},
+        )
+
+        sender.offer(frame(sequenceNumber = 1, flags = RealtimeUdpSender.FLAG_CODEC_CONFIG))
+        sender.offer(
+            frame(
+                sequenceNumber = 2,
+                track = MediaTrack.Audio,
+                codec = MediaCodecType.Aac,
+                flags = RealtimeUdpSender.FLAG_CODEC_CONFIG,
+            ),
+        )
+        sender.offer(frame(sequenceNumber = 3, flags = RealtimeUdpSender.FLAG_CODEC_CONFIG))
+
+        assertEquals(listOf(2, 3), sender.drainQueuedForTest().map { it.sequenceNumber })
+    }
+
+    @Test
     fun pacingSleepsBetweenDatagrams() {
         val sleeps = mutableListOf<Long>()
         val socket = FakeUdpSocket()
@@ -110,12 +201,14 @@ class RealtimeUdpSenderTest {
 
     private fun frame(
         sequenceNumber: Int,
+        track: MediaTrack = MediaTrack.Video,
+        codec: MediaCodecType = MediaCodecType.H264,
         flags: Int = 0,
         data: ByteArray = byteArrayOf(sequenceNumber.toByte()),
     ): OutboundMediaFrame =
         OutboundMediaFrame(
-            track = MediaTrack.Video,
-            codec = MediaCodecType.H264,
+            track = track,
+            codec = codec,
             sequenceNumber = sequenceNumber,
             timestampMicros = sequenceNumber * 1_000L,
             flags = flags,

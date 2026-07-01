@@ -6,6 +6,7 @@ import com.zx.homecamera.core.protocol.ControlMessage
 import com.zx.homecamera.core.protocol.ControlProtocol
 import java.io.BufferedReader
 import java.io.InputStreamReader
+import java.net.DatagramSocket
 import java.net.InetSocketAddress
 import java.net.Socket
 import java.util.UUID
@@ -13,6 +14,7 @@ import java.util.UUID
 class LanViewerConnector {
     fun connect(device: CollectorDevice, timeoutMillis: Int): ViewerConnection {
         val socket = Socket()
+        val udpSocket = DatagramSocket(0)
         try {
             logNet("viewer connect start host=${device.hostAddress} port=${device.tcpPort} timeoutMs=$timeoutMillis")
             socket.connect(InetSocketAddress(device.hostAddress, device.tcpPort), timeoutMillis)
@@ -24,13 +26,13 @@ class LanViewerConnector {
                 ControlProtocol.encode(
                     ControlMessage.ViewStart(
                         clientId = UUID.randomUUID().toString(),
-                        udpPort = CLIENT_UDP_PORT,
+                        udpPort = udpSocket.localPort,
                     ),
                 ),
             )
             writer.newLine()
             writer.flush()
-            logNet("viewer sent ViewStart udpPort=$CLIENT_UDP_PORT")
+            logNet("viewer sent ViewStart udpPort=${udpSocket.localPort}")
 
             val reader = BufferedReader(InputStreamReader(socket.getInputStream(), Charsets.UTF_8))
             val response = ControlProtocol.decode(reader.readLine())
@@ -55,11 +57,13 @@ class LanViewerConnector {
                 audioSampleRate = response.audioSampleRate,
                 audioChannelCount = response.audioChannelCount,
                 audioBitrate = response.audioBitrate,
+                udpSocket = udpSocket,
                 controlSocket = socket,
             )
         } catch (error: Throwable) {
             logNetError("viewer connect failed host=${device.hostAddress} port=${device.tcpPort}: ${error.message}", error)
             socket.close()
+            udpSocket.close()
             throw error
         }
     }
@@ -84,5 +88,11 @@ data class ViewerConnection(
     val audioSampleRate: Int = AacAudioConfig.SAMPLE_RATE,
     val audioChannelCount: Int = AacAudioConfig.CHANNEL_COUNT,
     val audioBitrate: Int = AacAudioConfig.BITRATE,
+    val udpSocket: DatagramSocket? = null,
     val controlSocket: Socket? = null,
-)
+) {
+    fun close() {
+        controlSocket?.runCatching { close() }
+        udpSocket?.runCatching { close() }
+    }
+}

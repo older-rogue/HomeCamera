@@ -20,6 +20,8 @@ object H264UdpPacket {
     const val FLAG_KEY_FRAME = MediaUdpPacket.FLAG_KEY_FRAME
     const val FLAG_CODEC_CONFIG = MediaUdpPacket.FLAG_CODEC_CONFIG
     const val DEFAULT_MAX_DATAGRAM_SIZE = MediaUdpPacket.DEFAULT_MAX_DATAGRAM_SIZE
+    const val MAX_FRAME_SIZE_BYTES = MediaUdpPacket.MAX_FRAME_SIZE_BYTES
+    const val MAX_FRAGMENTS_PER_FRAME = MediaUdpPacket.MAX_FRAGMENTS_PER_FRAME
 
     fun encodeFrame(
         sequenceNumber: Int,

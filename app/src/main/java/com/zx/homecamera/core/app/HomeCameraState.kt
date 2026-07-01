@@ -93,6 +93,7 @@ sealed interface HomeCameraAction {
     data object StartCollector : HomeCameraAction
     data object CollectorStarted : HomeCameraAction
     data class CollectorFailed(val reason: String) : HomeCameraAction
+    data class RecordingFailed(val reason: String) : HomeCameraAction
     data class ClientCountChanged(val count: Int) : HomeCameraAction
     data object StopCollector : HomeCameraAction
     data object StartScan : HomeCameraAction
@@ -141,6 +142,13 @@ object HomeCameraReducer {
             is HomeCameraAction.CollectorFailed -> state.copy(
                 collector = state.collector.copy(
                     serviceStatus = ServiceStatus.Error,
+                    recordingStatus = RecordingStatus.Error,
+                    errorMessage = action.reason,
+                ),
+            )
+
+            is HomeCameraAction.RecordingFailed -> state.copy(
+                collector = state.collector.copy(
                     recordingStatus = RecordingStatus.Error,
                     errorMessage = action.reason,
                 ),

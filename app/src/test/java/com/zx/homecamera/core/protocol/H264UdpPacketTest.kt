@@ -60,6 +60,20 @@ class H264UdpPacketTest {
     }
 
     @Test
+    fun rejectsFrameAboveMaxSize() {
+        val error = runCatching {
+            H264UdpPacket.encodeFrame(
+                sequenceNumber = 1,
+                timestampMicros = 1L,
+                flags = 0,
+                data = ByteArray(H264UdpPacket.MAX_FRAME_SIZE_BYTES + 1),
+            )
+        }.exceptionOrNull()
+
+        assertNotNull(error)
+    }
+
+    @Test
     fun rejectsInvalidDatagram() {
         val invalid = ByteArray(32) { 1 }
 

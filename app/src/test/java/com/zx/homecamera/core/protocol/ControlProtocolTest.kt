@@ -91,6 +91,36 @@ class ControlProtocolTest {
     }
 
     @Test
+    fun pingMessageRoundTripsWithTimestamp() {
+        val message = ControlMessage.Ping(timestampMillis = 123_456L)
+
+        val encoded = ControlProtocol.encode(message)
+        val decoded = ControlProtocol.decode(encoded)
+
+        assertEquals(message, decoded)
+    }
+
+    @Test
+    fun pongMessageRoundTripsWithTimestamp() {
+        val message = ControlMessage.Pong(timestampMillis = 123_456L)
+
+        val encoded = ControlProtocol.encode(message)
+        val decoded = ControlProtocol.decode(encoded)
+
+        assertEquals(message, decoded)
+    }
+
+    @Test
+    fun byeMessageRoundTripsWithReason() {
+        val message = ControlMessage.Bye(reason = "viewer_stop")
+
+        val encoded = ControlProtocol.encode(message)
+        val decoded = ControlProtocol.decode(encoded)
+
+        assertEquals(message, decoded)
+    }
+
+    @Test
     fun invalidMessageReturnsNull() {
         assertNull(ControlProtocol.decode("NOT_HOME_CAMERA|value=1"))
     }

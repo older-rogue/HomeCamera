@@ -85,10 +85,15 @@ class RealtimeUdpSender(
 
     fun offer(frame: OutboundMediaFrame) {
         synchronized(lock) {
-            val queueDepth = queue.size
             if (queue.size >= queueCapacity) {
-                val dropped = removeOldestNonKeyVideoFrame() ?: queue.pollFirst()
-                if (dropped != null) droppedFrames++
+                val dropped = selectFrameToDrop(incoming = frame)
+                if (dropped == null) {
+                    droppedFrames++
+                    (lock as Object).notifyAll()
+                    return
+                }
+                queue.remove(dropped)
+                droppedFrames++
             }
             queue.addLast(frame)
             (lock as Object).notifyAll()
@@ -123,14 +128,20 @@ class RealtimeUdpSender(
         if (destinations.isEmpty()) return
 
         val sendStartNanos = System.nanoTime()
-        val datagrams = MediaUdpPacket.encodeFrame(
-            track = frame.track,
-            codec = frame.codec,
-            sequenceNumber = frame.sequenceNumber,
-            timestampMicros = frame.timestampMicros,
-            flags = frame.flags,
-            data = frame.data,
-        )
+        val datagrams = runCatching {
+            MediaUdpPacket.encodeFrame(
+                track = frame.track,
+                codec = frame.codec,
+                sequenceNumber = frame.sequenceNumber,
+                timestampMicros = frame.timestampMicros,
+                flags = frame.flags,
+                data = frame.data,
+            )
+        }.getOrElse { error ->
+            droppedFrames++
+            Log.w(TAG, "drop invalid media frame: track=${frame.track} size=${frame.data.size} flags=${frame.flags}", error)
+            return
+        }
         datagrams.forEachIndexed { index, datagram ->
             destinations.forEach { destination ->
                 runCatching {
@@ -148,17 +159,27 @@ class RealtimeUdpSender(
         recordStats(frame, datagrams.size)
     }
 
-    private fun removeOldestNonKeyVideoFrame(): OutboundMediaFrame? {
-        val iterator = queue.iterator()
-        while (iterator.hasNext()) {
-            val frame = iterator.next()
-            if (frame.track == MediaTrack.Video && frame.flags and FLAG_KEY_FRAME == 0) {
-                iterator.remove()
-                return frame
-            }
+    private fun selectFrameToDrop(incoming: OutboundMediaFrame): OutboundMediaFrame? {
+        if (incoming.isCodecConfig()) {
+            return queue.firstOrNull { !it.isCodecConfig() }
+                ?: queue.firstOrNull { it.track == incoming.track && it.codec == incoming.codec }
         }
-        return null
+        return queue.firstOrNull { it.isDroppableDeltaVideoFrame() }
+            ?: queue.firstOrNull { it.isDroppableAudioSample() }
+            ?: queue.firstOrNull { it.isDroppableKeyVideoFrame() }
     }
+
+    private fun OutboundMediaFrame.isCodecConfig(): Boolean =
+        flags and FLAG_CODEC_CONFIG != 0
+
+    private fun OutboundMediaFrame.isDroppableDeltaVideoFrame(): Boolean =
+        !isCodecConfig() && track == MediaTrack.Video && flags and FLAG_KEY_FRAME == 0
+
+    private fun OutboundMediaFrame.isDroppableAudioSample(): Boolean =
+        !isCodecConfig() && track == MediaTrack.Audio
+
+    private fun OutboundMediaFrame.isDroppableKeyVideoFrame(): Boolean =
+        !isCodecConfig() && track == MediaTrack.Video && flags and FLAG_KEY_FRAME != 0
 
     private fun recordStats(frame: OutboundMediaFrame, datagramCount: Int) {
         sentDatagrams += datagramCount
@@ -186,6 +207,7 @@ class RealtimeUdpSender(
 
     companion object {
         const val FLAG_KEY_FRAME = MediaUdpPacket.FLAG_KEY_FRAME
+        const val FLAG_CODEC_CONFIG = MediaUdpPacket.FLAG_CODEC_CONFIG
         const val DEFAULT_QUEUE_CAPACITY = 12
         const val DEFAULT_PACKET_PACING_MICROS = 0L
         private const val STATS_LOG_INTERVAL_MILLIS = 1_000L

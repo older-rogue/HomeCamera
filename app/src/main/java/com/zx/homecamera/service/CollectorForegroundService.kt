@@ -1,5 +1,6 @@
 package com.zx.homecamera.service
 
+import android.Manifest
 import android.annotation.SuppressLint
 import android.app.Notification
 import android.app.NotificationChannel
@@ -7,12 +8,15 @@ import android.app.NotificationManager
 import android.app.Service
 import android.content.Context
 import android.content.Intent
+import android.content.pm.PackageManager
+import android.content.pm.ServiceInfo
 import android.net.wifi.WifiManager
 import android.os.Build
 import android.os.IBinder
 import android.os.PowerManager
 import android.provider.Settings
 import androidx.core.app.NotificationCompat
+import androidx.core.content.ContextCompat
 import com.zx.homecamera.R
 import com.zx.homecamera.audio.AacAudioConfig
 import com.zx.homecamera.core.protocol.ControlMessage
@@ -29,13 +33,16 @@ import java.net.NetworkInterface
 import java.net.ServerSocket
 import java.net.Socket
 import java.net.SocketException
+import java.net.SocketTimeoutException
 import java.time.LocalDate
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
 
 class CollectorForegroundService : Service() {
     private val lifecycle = CollectorServiceLifecycle()
-    private var executor: ExecutorService? = null
+    private var serverExecutor: ExecutorService? = null
+    private var clientExecutor: ExecutorService? = null
+    private var maintenanceExecutor: ExecutorService? = null
     private var serverSocket: ServerSocket? = null
     private var cameraStreamer: CameraH264Streamer? = null
     private var wifiLock: WifiManager.WifiLock? = null
@@ -46,11 +53,17 @@ class CollectorForegroundService : Service() {
     override fun onBind(intent: Intent?): IBinder? = null
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        when (intent?.action) {
-            ACTION_STOP -> stopCollector(startId)
-            else -> startCollector(startId)
+        return when (intent?.action) {
+            ACTION_START -> {
+                startCollector(startId)
+                START_STICKY
+            }
+            ACTION_STOP -> {
+                stopCollector(startId)
+                START_NOT_STICKY
+            }
+            else -> START_NOT_STICKY
         }
-        return START_STICKY
     }
 
     override fun onDestroy() {
@@ -65,9 +78,19 @@ class CollectorForegroundService : Service() {
         val decision = lifecycle.onStart(startId)
         if (!decision.shouldStartResources) return
 
-        startForeground(NOTIFICATION_ID, buildNotification(isCollecting = true))
+        startCollectorForeground(isCollecting = true)
         try {
-            val streamer = CameraH264Streamer(applicationContext, recordingRoot)
+            val streamer = CameraH264Streamer(
+                context = applicationContext,
+                recordingRoot = recordingRoot,
+                onRecordingError = { error ->
+                    sendStatusBroadcast(
+                        STATUS_RECORDING_ERROR,
+                        EXTRA_MESSAGE,
+                        error.message ?: "录像写入失败",
+                    )
+                },
+            )
             cameraStreamer = streamer
             CollectorCameraRuntime.attachStreamer(streamer)
             streamer.start()
@@ -87,9 +110,12 @@ class CollectorForegroundService : Service() {
             return
         }
 
-        executor = Executors.newFixedThreadPool(4).also { pool ->
-            pool.executeCatching(::runControlServer)
-            pool.executeCatching(::cleanRecordingsOnce)
+        serverExecutor = Executors.newSingleThreadExecutor().also { executor ->
+            executor.executeCatching(::runControlServer)
+        }
+        clientExecutor = Executors.newFixedThreadPool(CLIENT_HANDLER_THREADS)
+        maintenanceExecutor = Executors.newSingleThreadExecutor().also { executor ->
+            executor.executeCatching(::cleanRecordingsOnce)
         }
     }
 
@@ -97,6 +123,7 @@ class CollectorForegroundService : Service() {
         val decision = lifecycle.onStop(startId)
         if (decision.shouldReleaseResources) {
             releaseCollectorResources()
+            stopForeground(STOP_FOREGROUND_REMOVE)
             sendStatusBroadcast(STATUS_STOPPED)
         }
         if (decision.shouldKeepServiceForeground) {
@@ -113,10 +140,14 @@ class CollectorForegroundService : Service() {
         cameraStreamer?.runCatching { stop() }
         cameraStreamer?.runCatching { CollectorCameraRuntime.detachStreamer(this) }
         cameraStreamer = null
-        executor?.runCatching { shutdownNow() }
+        serverExecutor?.runCatching { shutdownNow() }
+        clientExecutor?.runCatching { shutdownNow() }
+        maintenanceExecutor?.runCatching { shutdownNow() }
         releaseWifiLock()
         releaseCpuWakeLock()
-        executor = null
+        serverExecutor = null
+        clientExecutor = null
+        maintenanceExecutor = null
     }
 
     private fun runControlServer() {
@@ -129,7 +160,7 @@ class CollectorForegroundService : Service() {
                 while (lifecycle.isRunning) {
                     val socket = server.accept()
                     logNet("collector tcp accepted remote=${socket.inetAddress?.hostAddress}:${socket.port}")
-                    executor?.executeCatching {
+                    clientExecutor?.executeCatching {
                         handleClient(socket, deviceId, deviceName)
                     }
                 }
@@ -178,13 +209,35 @@ class CollectorForegroundService : Service() {
             writer.newLine()
             writer.flush()
             logNet("collector sent Hello remote=${client.inetAddress?.hostAddress}:${client.port} streamPort=$STREAM_PORT")
-            cameraStreamer?.addClient(client.inetAddress, message.udpPort)
-            client.soTimeout = 0
+            var clientAdded = false
+            try {
+                cameraStreamer?.addClient(client.inetAddress, message.udpPort)
+                clientAdded = true
+                sendStatusBroadcast(STATUS_RUNNING, EXTRA_CLIENT_COUNT, cameraStreamer?.clientCount()?.toString() ?: "0")
+                client.soTimeout = CONTROL_READ_TIMEOUT_MILLIS
 
-            while (lifecycle.isRunning) {
-                val controlMessage = reader.readLine()?.let(ControlProtocol::decode) ?: return
-                if (controlMessage is ControlMessage.RequestKeyFrame) {
-                    cameraStreamer?.requestKeyFrame()
+                while (lifecycle.isRunning) {
+                    val controlMessage = try {
+                        reader.readLine()?.let(ControlProtocol::decode) ?: return
+                    } catch (_: SocketTimeoutException) {
+                        logNet("collector tcp client timeout remote=${client.inetAddress?.hostAddress}:${client.port}")
+                        return
+                    }
+                    when (controlMessage) {
+                        is ControlMessage.RequestKeyFrame -> cameraStreamer?.requestKeyFrame()
+                        is ControlMessage.Ping -> {
+                            writer.write(ControlProtocol.encode(ControlMessage.Pong(controlMessage.timestampMillis)))
+                            writer.newLine()
+                            writer.flush()
+                        }
+                        is ControlMessage.Bye -> return
+                        else -> Unit
+                    }
+                }
+            } finally {
+                if (clientAdded) {
+                    cameraStreamer?.removeClient(client.inetAddress, message.udpPort)
+                    sendStatusBroadcast(STATUS_RUNNING, EXTRA_CLIENT_COUNT, cameraStreamer?.clientCount()?.toString() ?: "0")
                 }
             }
         }
@@ -205,6 +258,28 @@ class CollectorForegroundService : Service() {
             }
             .joinToString(",")
             .ifBlank { "none" }
+
+    private fun startCollectorForeground(isCollecting: Boolean) {
+        val notification = buildNotification(isCollecting)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            startForeground(NOTIFICATION_ID, notification, foregroundServiceType())
+        } else {
+            startForeground(NOTIFICATION_ID, notification)
+        }
+    }
+
+    private fun foregroundServiceType(): Int {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) return 0
+        val cameraType = ServiceInfo.FOREGROUND_SERVICE_TYPE_CAMERA
+        val microphoneType = if (ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO) ==
+            PackageManager.PERMISSION_GRANTED
+        ) {
+            ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE
+        } else {
+            0
+        }
+        return cameraType or microphoneType
+    }
 
     private fun buildNotification(isCollecting: Boolean): Notification {
         val manager = getSystemService(NotificationManager::class.java)
@@ -299,9 +374,11 @@ class CollectorForegroundService : Service() {
         const val ACTION_COLLECTOR_STATUS = "com.zx.homecamera.action.COLLECTOR_STATUS"
         const val EXTRA_STATUS = "status"
         const val EXTRA_MESSAGE = "message"
+        const val EXTRA_CLIENT_COUNT = "client_count"
         const val STATUS_RUNNING = "running"
         const val STATUS_ERROR = "error"
         const val STATUS_STOPPED = "stopped"
+        const val STATUS_RECORDING_ERROR = "recording_error"
         const val CONTROL_PORT = 62001
         const val STREAM_PORT = 62010
         private const val CHANNEL_ID = "collector"
@@ -311,5 +388,7 @@ class CollectorForegroundService : Service() {
         private const val DEFAULT_DISPLAY_WIDTH = 480
         private const val DEFAULT_DISPLAY_HEIGHT = 640
         private const val DEFAULT_STREAM_FPS = 15
+        private const val CONTROL_READ_TIMEOUT_MILLIS = 15_000
+        private const val CLIENT_HANDLER_THREADS = 4
     }
 }

@@ -42,6 +42,7 @@ class MainActivity : ComponentActivity() {
             val viewModel: HomeCameraViewModel = viewModel()
             val state by viewModel.state.collectAsState()
             var collectorPreviewSize by remember { mutableStateOf(defaultCollectorPreviewSize()) }
+            var permissionRequestTarget by remember { mutableStateOf<PermissionRequestTarget?>(null) }
             val context = LocalContext.current
 
             fun displayRotationDegrees(): Int =
@@ -86,19 +87,29 @@ class MainActivity : ComponentActivity() {
             val permissionLauncher = rememberLauncherForActivityResult(
                 contract = ActivityResultContracts.RequestMultiplePermissions(),
             ) { grants ->
-                if (grants[Manifest.permission.CAMERA] == true &&
-                    grants[Manifest.permission.RECORD_AUDIO] == true
-                ) {
-                    preselectCollectorPreviewSize()
-                    viewModel.onAction(HomeCameraAction.StartCollector)
-                    viewModel.startCollectorService()
-                } else {
-                    val message = if (grants[Manifest.permission.CAMERA] != true) {
-                        "摄像头权限被拒绝，无法启动采集端"
-                    } else {
-                        "麦克风权限被拒绝，无法启动实时音频采集"
+                val target = permissionRequestTarget
+                permissionRequestTarget = null
+                if (grants[Manifest.permission.CAMERA] != true) {
+                    val message = when (target) {
+                        PermissionRequestTarget.LocalDebug -> "摄像头权限被拒绝，无法启动本地调试"
+                        else -> "摄像头权限被拒绝，无法启动采集端"
                     }
-                    viewModel.onAction(HomeCameraAction.CollectorFailed(message))
+                    when (target) {
+                        PermissionRequestTarget.LocalDebug -> viewModel.onAction(
+                            HomeCameraAction.LocalDebugStatusChanged(ViewerStatus.Error, message),
+                        )
+                        else -> viewModel.onAction(HomeCameraAction.CollectorFailed(message))
+                    }
+                    return@rememberLauncherForActivityResult
+                }
+
+                preselectCollectorPreviewSize()
+                when (target) {
+                    PermissionRequestTarget.LocalDebug -> viewModel.onAction(HomeCameraAction.EnterLocalDebug)
+                    else -> {
+                        viewModel.onAction(HomeCameraAction.StartCollector)
+                        viewModel.startCollectorService()
+                    }
                 }
             }
 
@@ -109,6 +120,11 @@ class MainActivity : ComponentActivity() {
                         when (action) {
                             HomeCameraAction.StartCollector -> {
                                 preselectCollectorPreviewSize()
+                                permissionRequestTarget = PermissionRequestTarget.Collector
+                                permissionLauncher.launch(collectorPermissions())
+                            }
+                            HomeCameraAction.EnterLocalDebug -> {
+                                permissionRequestTarget = PermissionRequestTarget.LocalDebug
                                 permissionLauncher.launch(collectorPermissions())
                             }
                             else -> viewModel.onAction(action)
@@ -154,5 +170,10 @@ class MainActivity : ComponentActivity() {
     private fun defaultCollectorPreviewSize(): PreviewSize {
         val size = VideoSize(H264StreamConfig.WIDTH, H264StreamConfig.HEIGHT)
         return PreviewSize(bufferSize = size, displaySize = size)
+    }
+
+    private enum class PermissionRequestTarget {
+        Collector,
+        LocalDebug,
     }
 }

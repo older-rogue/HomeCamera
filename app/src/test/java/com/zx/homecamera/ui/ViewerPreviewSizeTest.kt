@@ -27,8 +27,8 @@ class ViewerPreviewSizeTest {
 
     @Test
     fun fallsBackToPortraitDefaultBeforeConnectionCompletes() {
-        assertEquals(VideoSize(480, 640), ViewerPreviewSize.displaySize(null))
-        assertEquals(VideoSize(640, 480), ViewerPreviewSize.surfaceSize(null))
+        assertEquals(VideoSize(720, 1280), ViewerPreviewSize.displaySize(null))
+        assertEquals(VideoSize(1280, 720), ViewerPreviewSize.surfaceSize(null))
         assertEquals(90f, ViewerPreviewSize.rotationDegrees(null))
     }
 }
