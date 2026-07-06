@@ -18,6 +18,7 @@ import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
@@ -28,6 +29,7 @@ import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Scaffold
@@ -39,6 +41,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
+import androidx.activity.compose.BackHandler
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
@@ -77,6 +80,7 @@ fun HomeCameraApp(
     onViewerSurfaceDestroyed: () -> Unit = {},
     onLocalDebugViewerSurfaceReady: (Surface) -> Unit = {},
     onLocalDebugViewerSurfaceDestroyed: () -> Unit = {},
+    onExitApp: () -> Unit = {},
 ) {
     var collectorPreviewWidth by rememberSaveable(collectorInitialPreviewSize) {
         mutableStateOf(collectorInitialPreviewSize.width)
@@ -109,6 +113,14 @@ fun HomeCameraApp(
         return
     }
 
+    BackHandler(enabled = state.screen == Screen.Collector || state.screen == Screen.RoleSelection) {
+        when (state.screen) {
+            Screen.Collector -> onAction(HomeCameraAction.BackToRoleSelection)
+            Screen.RoleSelection -> onExitApp()
+            else -> Unit
+        }
+    }
+
     Scaffold(
         topBar = {
             TopAppBar(
@@ -122,6 +134,16 @@ fun HomeCameraApp(
                             Screen.LocalDebug -> "本地调试"
                         },
                     )
+                },
+                navigationIcon = {
+                    if (state.screen == Screen.Collector) {
+                        IconButton(onClick = { onAction(HomeCameraAction.BackToRoleSelection) }) {
+                            Text(
+                                text = "‹",
+                                style = MaterialTheme.typography.headlineMedium,
+                            )
+                        }
+                    }
                 },
             )
         },
@@ -209,7 +231,11 @@ private fun CollectorScreen(
         Box(
             modifier = Modifier
                 .fillMaxWidth()
-                .aspectRatio(previewDisplaySize.width.toFloat() / previewDisplaySize.height.toFloat())
+                .heightIn(max = 280.dp)
+                .aspectRatio(
+                    previewDisplaySize.width.toFloat() / previewDisplaySize.height.toFloat(),
+                    matchHeightConstraintsFirst = true,
+                )
                 .background(Color.Black),
             contentAlignment = Alignment.Center,
         ) {
@@ -262,22 +288,6 @@ private fun CollectorScreen(
         )
         StatusRow("录像状态", state.recordingStatus.label())
         state.errorMessage?.let { Text(text = it, color = MaterialTheme.colorScheme.error) }
-
-        Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-            Button(
-                enabled = state.serviceStatus != ServiceStatus.Running &&
-                    state.serviceStatus != ServiceStatus.Starting,
-                onClick = { onAction(HomeCameraAction.StartCollector) },
-            ) {
-                Text("开始服务")
-            }
-            OutlinedButton(
-                enabled = state.serviceStatus == ServiceStatus.Running,
-                onClick = { onAction(HomeCameraAction.StopCollector) },
-            ) {
-                Text("停止服务")
-            }
-        }
     }
 }
 

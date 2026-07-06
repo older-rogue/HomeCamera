@@ -1,6 +1,7 @@
 package com.zx.homecamera
 
 import android.Manifest
+import android.content.pm.PackageManager
 import android.os.Build
 import android.os.Bundle
 import android.view.Surface
@@ -18,10 +19,12 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.platform.LocalContext
+import androidx.core.content.ContextCompat
 import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
 import androidx.lifecycle.viewmodel.compose.viewModel
+import com.zx.homecamera.core.app.AppRole
 import com.zx.homecamera.core.app.HomeCameraAction
 import com.zx.homecamera.core.app.Screen
 import com.zx.homecamera.core.app.ViewerStatus
@@ -41,6 +44,7 @@ class MainActivity : ComponentActivity() {
         setContent {
             val viewModel: HomeCameraViewModel = viewModel()
             val state by viewModel.state.collectAsState()
+            val viewerConnection by viewModel.viewerConnectionState.collectAsState()
             var collectorPreviewSize by remember { mutableStateOf(defaultCollectorPreviewSize()) }
             var permissionRequestTarget by remember { mutableStateOf<PermissionRequestTarget?>(null) }
             val context = LocalContext.current
@@ -113,15 +117,39 @@ class MainActivity : ComponentActivity() {
                 }
             }
 
+            val ensureCollectorPermissionsAndStart = {
+                val permissions = collectorPermissions()
+                val allGranted = permissions.all {
+                    ContextCompat.checkSelfPermission(context, it) == PackageManager.PERMISSION_GRANTED
+                }
+                if (allGranted) {
+                    preselectCollectorPreviewSize()
+                    viewModel.onAction(HomeCameraAction.StartCollector)
+                    viewModel.startCollectorService()
+                } else {
+                    preselectCollectorPreviewSize()
+                    permissionRequestTarget = PermissionRequestTarget.Collector
+                    permissionLauncher.launch(permissions)
+                }
+            }
+
             HomeCameraTheme {
                 HomeCameraApp(
                     state = state,
                     onAction = { action ->
                         when (action) {
+                            is HomeCameraAction.SelectRole -> {
+                                viewModel.onAction(action)
+                                if (action.role == AppRole.Collector) {
+                                    ensureCollectorPermissionsAndStart()
+                                }
+                            }
                             HomeCameraAction.StartCollector -> {
-                                preselectCollectorPreviewSize()
-                                permissionRequestTarget = PermissionRequestTarget.Collector
-                                permissionLauncher.launch(collectorPermissions())
+                                ensureCollectorPermissionsAndStart()
+                            }
+                            HomeCameraAction.BackToRoleSelection -> {
+                                viewModel.stopCollectorService()
+                                viewModel.onAction(action)
                             }
                             HomeCameraAction.EnterLocalDebug -> {
                                 permissionRequestTarget = PermissionRequestTarget.LocalDebug
@@ -140,7 +168,7 @@ class MainActivity : ComponentActivity() {
                     onCollectorPreviewSizeChanged = { listener ->
                         CollectorCameraRuntime.setPreviewDisplaySizeListener(listener)
                     },
-                    viewerConnection = null, // ViewModel manages viewer connection internally
+                    viewerConnection = viewerConnection,
                     onViewerSurfaceReady = { surface ->
                         viewModel.onViewerSurfaceReady(surface)
                     },
@@ -152,6 +180,10 @@ class MainActivity : ComponentActivity() {
                     },
                     onLocalDebugViewerSurfaceDestroyed = {
                         viewModel.stopLocalDebugSession()
+                    },
+                    onExitApp = {
+                        viewModel.stopCollectorService()
+                        finishAndRemoveTask()
                     },
                 )
             }

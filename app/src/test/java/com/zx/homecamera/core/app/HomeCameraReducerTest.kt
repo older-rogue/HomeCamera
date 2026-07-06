@@ -85,6 +85,30 @@ class HomeCameraReducerTest {
     }
 
     @Test
+    fun startScanClearsStaleDeviceList() {
+        val device = CollectorDevice(
+            deviceId = "collector-1",
+            name = "客厅采集端",
+            hostAddress = "192.168.1.24",
+            tcpPort = 62000,
+            online = true,
+        )
+        val state = HomeCameraState(
+            role = AppRole.Client,
+            screen = Screen.ClientList,
+            client = ClientState(
+                scanStatus = ScanStatus.Finished,
+                devices = listOf(device),
+            ),
+        )
+
+        val result = HomeCameraReducer.reduce(state, HomeCameraAction.StartScan)
+
+        assertEquals(ScanStatus.Scanning, result.client.scanStatus)
+        assertEquals(emptyList<CollectorDevice>(), result.client.devices)
+    }
+
+    @Test
     fun recordingFailureDoesNotFailRunningCollectorService() {
         val running = HomeCameraState(
             collector = CollectorState(

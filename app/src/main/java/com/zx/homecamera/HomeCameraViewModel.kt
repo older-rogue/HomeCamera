@@ -51,8 +51,14 @@ class HomeCameraViewModel(application: Application) : AndroidViewModel(applicati
     private var localDebugSession: LocalDebugSession? = null
     private var wifiLock: WifiManager.WifiLock? = null
 
-    @Volatile
-    private var viewerConnection: ViewerConnection? = null
+    private val _viewerConnectionState = MutableStateFlow<ViewerConnection?>(null)
+    val viewerConnectionState: StateFlow<ViewerConnection?> = _viewerConnectionState.asStateFlow()
+
+    private var viewerConnection: ViewerConnection?
+        get() = _viewerConnectionState.value
+        set(value) {
+            _viewerConnectionState.value = value
+        }
 
     @Volatile
     private var viewerSurface: Surface? = null
@@ -195,6 +201,12 @@ class HomeCameraViewModel(application: Application) : AndroidViewModel(applicati
     fun startCollectorService() {
         val context = getApplication<Application>()
         context.startCollectorService(ACTION_START)
+    }
+
+    fun stopCollectorService() {
+        val context = getApplication<Application>()
+        context.startCollectorService(ACTION_STOP)
+        _state.value = HomeCameraReducer.reduce(_state.value, HomeCameraAction.StopCollector)
     }
 
     fun onViewerSurfaceReady(surface: Surface) {
@@ -386,24 +398,7 @@ class HomeCameraViewModel(application: Application) : AndroidViewModel(applicati
                         )
                         val reconnectGeneration = viewerGeneration.get()
                         _state.value.viewer.selectedDevice?.let { device ->
-                            connectViewer(device, maxAttempts = 5) { reconnected, reconnectMessage ->
-                                if (!isViewerGenerationActive(reconnectGeneration, device)) {
-                                    reconnected?.close()
-                                    return@connectViewer
-                                }
-                                if (reconnected == null) {
-                                    _state.value = HomeCameraReducer.reduce(
-                                        _state.value,
-                                        HomeCameraAction.ViewerStatusChanged(
-                                            ViewerStatus.Error,
-                                            reconnectMessage,
-                                        ),
-                                    )
-                                } else {
-                                    viewerConnection = reconnected
-                                    startViewerStreamIfReady(reconnectGeneration)
-                                }
-                            }
+                            reconnectViewerStream(reconnectGeneration, device)
                         }
                     }
                 },
@@ -430,17 +425,67 @@ class HomeCameraViewModel(application: Application) : AndroidViewModel(applicati
             repeat(maxAttempts.coerceAtLeast(1)) { attempt ->
                 if (connection == null) {
                     val result = runCatching {
-                        LanViewerConnector().connect(device, timeoutMillis = 2_500)
+                        LanViewerConnector().connect(device, timeoutMillis = VIEWER_CONNECT_TIMEOUT_MILLIS)
                     }
                     connection = result.getOrNull()
                     lastError = result.exceptionOrNull()
                     if (connection == null && attempt < maxAttempts - 1) {
-                        Thread.sleep(1_000)
+                        Thread.sleep(VIEWER_RECONNECT_FAST_INTERVAL_MILLIS)
                     }
                 }
             }
             viewModelScope.launch {
                 onResult(connection, lastError?.message)
+            }
+        }
+    }
+
+    /**
+     * 持续重连采集端，直到连接成功或当前 viewer generation 失效（用户退出/切换设备）。
+     * 先快速重试几次，之后转为慢速间隔，避免采集端短暂故障后客户端永久卡死。
+     */
+    private fun reconnectViewerStream(generation: Long, device: CollectorDevice) {
+        viewerExecutor.execute {
+            var attempt = 0
+            var lastError: Throwable? = null
+            while (isViewerGenerationActive(generation, device)) {
+                val result = runCatching {
+                    LanViewerConnector().connect(device, timeoutMillis = VIEWER_CONNECT_TIMEOUT_MILLIS)
+                }
+                val connection = result.getOrNull()
+                if (connection != null) {
+                    viewModelScope.launch {
+                        if (!isViewerGenerationActive(generation, device)) {
+                            connection.close()
+                            return@launch
+                        }
+                        viewerConnection = connection
+                        startViewerStreamIfReady(generation)
+                    }
+                    return@execute
+                }
+                lastError = result.exceptionOrNull()
+                attempt++
+                val delayMillis = if (attempt < VIEWER_RECONNECT_FAST_ATTEMPTS) {
+                    VIEWER_RECONNECT_FAST_INTERVAL_MILLIS
+                } else {
+                    VIEWER_RECONNECT_SLOW_INTERVAL_MILLIS
+                }
+                try {
+                    Thread.sleep(delayMillis)
+                } catch (_: InterruptedException) {
+                    Thread.currentThread().interrupt()
+                    return@execute
+                }
+            }
+            val failure = lastError?.message
+            viewModelScope.launch {
+                if (isViewerGenerationActive(generation, device)) {
+                    _state.value = HomeCameraReducer.reduce(
+                        _state.value,
+                        HomeCameraAction.ViewerStatusChanged(ViewerStatus.Error, failure ?: "重连失败"),
+                    )
+                }
             }
         }
     }
@@ -481,6 +526,10 @@ class HomeCameraViewModel(application: Application) : AndroidViewModel(applicati
 
     companion object {
         private const val SCAN_RETRY_DELAY_MILLIS = 5_000L
+        private const val VIEWER_CONNECT_TIMEOUT_MILLIS = 2_500
+        private const val VIEWER_RECONNECT_FAST_INTERVAL_MILLIS = 1_000L
+        private const val VIEWER_RECONNECT_SLOW_INTERVAL_MILLIS = 5_000L
+        private const val VIEWER_RECONNECT_FAST_ATTEMPTS = 5
         private const val ACTION_START = CollectorForegroundService.ACTION_START
         private const val ACTION_STOP = CollectorForegroundService.ACTION_STOP
     }

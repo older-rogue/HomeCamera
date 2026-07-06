@@ -175,7 +175,11 @@ object HomeCameraReducer {
             )
 
             HomeCameraAction.StartScan -> state.copy(
-                client = state.client.copy(scanStatus = ScanStatus.Scanning, errorMessage = null),
+                client = state.client.copy(
+                    scanStatus = ScanStatus.Scanning,
+                    devices = emptyList(),
+                    errorMessage = null,
+                ),
             )
 
             is HomeCameraAction.DevicesDiscovered -> state.copy(
