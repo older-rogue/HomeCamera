@@ -10,6 +10,8 @@ import android.media.MediaCodec
 import android.media.MediaCodecInfo
 import android.media.MediaFormat
 import android.media.MediaRecorder
+import android.media.audiofx.AcousticEchoCanceler
+import android.media.audiofx.NoiseSuppressor
 import android.util.Log
 import androidx.core.content.ContextCompat
 import com.zx.homecamera.core.protocol.MediaUdpPacket
@@ -27,6 +29,8 @@ class AacAudioStreamer(
     private var executor: ExecutorService? = null
     private var audioRecord: AudioRecord? = null
     private var encoder: MediaCodec? = null
+    private var echoCanceler: AcousticEchoCanceler? = null
+    private var noiseSuppressor: NoiseSuppressor? = null
 
     fun start(
         onEvent: (EncodedAudioEvent) -> Unit,
@@ -57,6 +61,10 @@ class AacAudioStreamer(
         executor?.shutdownNow()
         executor?.awaitTermination(2_000, TimeUnit.MILLISECONDS)
         executor = null
+        echoCanceler?.runCatching { release() }
+        echoCanceler = null
+        noiseSuppressor?.runCatching { release() }
+        noiseSuppressor = null
         audioRecord?.runCatching { stop() }
         audioRecord?.runCatching { release() }
         audioRecord = null
@@ -75,7 +83,7 @@ class AacAudioStreamer(
         require(minBufferSize > 0) { "AudioRecord does not support AAC input config" }
         val readBufferSize = minBufferSize.coerceAtLeast(config.sampleRate / 10 * BYTES_PER_SAMPLE)
         val recorder = AudioRecord(
-            MediaRecorder.AudioSource.MIC,
+            MediaRecorder.AudioSource.VOICE_COMMUNICATION,
             config.sampleRate,
             AudioFormat.CHANNEL_IN_MONO,
             AudioFormat.ENCODING_PCM_16BIT,
@@ -85,6 +93,7 @@ class AacAudioStreamer(
             "AudioRecord failed to initialize"
         }
         audioRecord = recorder
+        configureAcousticEchoCancellation(recorder)
 
         val format = MediaFormat.createAudioFormat(
             MediaFormat.MIMETYPE_AUDIO_AAC,
@@ -99,7 +108,11 @@ class AacAudioStreamer(
         codec.configure(format, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
         codec.start()
         recorder.startRecording()
-        Log.i(TAG, "AAC audio capture started: ${config.sampleRate} Hz, ${config.channelCount} ch")
+        Log.i(
+            TAG,
+            "AAC audio capture started: ${config.sampleRate} Hz, ${config.channelCount} ch " +
+                "aec=${AcousticEchoCanceler.isAvailable()} ns=${NoiseSuppressor.isAvailable()}",
+        )
 
         val readBuffer = ByteArray(readBufferSize)
         val outputInfo = MediaCodec.BufferInfo()
@@ -129,6 +142,27 @@ class AacAudioStreamer(
             }
         } finally {
             drainEncoder(codec, outputInfo, onEvent)
+        }
+    }
+
+    /**
+     * 启用系统级声学回声消除（AEC）与噪声抑制（NS），避免两台设备靠近时
+     * 扬声器声音被麦克风重新拾取形成啸叫反馈。配合 VOICE_COMMUNICATION 音源使用，
+     * 这是免提通话场景的标准回声消除机制。
+     */
+    private fun configureAcousticEchoCancellation(recorder: AudioRecord) {
+        val audioSessionId = recorder.audioSessionId
+        if (AcousticEchoCanceler.isAvailable()) {
+            echoCanceler = AcousticEchoCanceler.create(audioSessionId)?.apply {
+                val enabled = setEnabled(true) == android.media.audiofx.AudioEffect.SUCCESS
+                Log.i(TAG, "AcousticEchoCanceler enabled=$enabled")
+            }
+        }
+        if (NoiseSuppressor.isAvailable()) {
+            noiseSuppressor = NoiseSuppressor.create(audioSessionId)?.apply {
+                val enabled = setEnabled(true) == android.media.audiofx.AudioEffect.SUCCESS
+                Log.i(TAG, "NoiseSuppressor enabled=$enabled")
+            }
         }
     }
 
