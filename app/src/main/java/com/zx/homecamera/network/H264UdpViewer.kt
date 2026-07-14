@@ -1,7 +1,9 @@
 package com.zx.homecamera.network
 
+import android.content.Context
 import android.media.AudioAttributes
 import android.media.AudioFormat
+import android.media.AudioManager
 import android.media.AudioTrack
 import android.media.MediaCodec
 import android.media.MediaCodecInfo
@@ -35,6 +37,7 @@ class H264UdpViewer {
     private val currentSession = AtomicReference<ViewerSession?>()
 
     fun start(
+        context: Context,
         connection: ViewerConnection,
         surface: Surface,
         onFirstFrame: () -> Unit,
@@ -58,6 +61,7 @@ class H264UdpViewer {
             controlWriter = controlWriter,
             videoQueue = videoQueue,
             audioQueue = audioQueue,
+            appContext = context.applicationContext,
         )
         currentSession.set(session)
 
@@ -325,6 +329,7 @@ class H264UdpViewer {
         runCatching {
             session.audioSampleRate = connection.audioSampleRate
             session.audioChannelCount = connection.audioChannelCount
+            enableSpeakerphone(session, true)
             val outputChannelMask = when (connection.audioChannelCount) {
                 1 -> AudioFormat.CHANNEL_OUT_MONO
                 2 -> AudioFormat.CHANNEL_OUT_STEREO
@@ -339,8 +344,9 @@ class H264UdpViewer {
             val track = AudioTrack.Builder()
                 .setAudioAttributes(
                     AudioAttributes.Builder()
-                        .setUsage(AudioAttributes.USAGE_VOICE_COMMUNICATION)
+                        .setUsage(AudioAttributes.USAGE_MEDIA)
                         .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
+                        .setLegacyStreamType(AudioManager.STREAM_MUSIC)
                         .build(),
                 )
                 .setAudioFormat(
@@ -462,6 +468,22 @@ class H264UdpViewer {
         session.audioTrack?.runCatching { release() }
         session.audioTrack = null
         session.audioDecoderConfigured = false
+        enableSpeakerphone(session, false)
+    }
+
+    /**
+     * 开启/关闭免提（扬声器外放）。播放端走媒体音量 + 扬声器，音量更大；
+     * 回声仍由采集端 AEC 消除。
+     */
+    private fun enableSpeakerphone(session: ViewerSession, enabled: Boolean) {
+        runCatching {
+            val audioManager = session.appContext.getSystemService(AudioManager::class.java) ?: return@runCatching
+            audioManager.mode = AudioManager.MODE_IN_COMMUNICATION
+            audioManager.isSpeakerphoneOn = enabled
+            Log.i(TAG, "speakerphone enabled=$enabled")
+        }.onFailure {
+            Log.w(TAG, "Failed to set speakerphone=$enabled", it)
+        }
     }
 
     private inner class ViewerSession(
@@ -472,6 +494,7 @@ class H264UdpViewer {
         val controlWriter: BufferedWriter?,
         val videoQueue: RealtimeVideoFrameQueue,
         val audioQueue: ArrayBlockingQueue<EncodedMediaFrame>,
+        val appContext: Context,
     ) {
         val running = AtomicBoolean(true)
         val lastPacketAtMillis = AtomicLong(System.currentTimeMillis())
@@ -495,6 +518,15 @@ class H264UdpViewer {
             controlSocket?.runCatching { close() }
             executor.shutdownNow()
             executor.runCatching { awaitTermination(WORKER_STOP_TIMEOUT_MILLIS, TimeUnit.MILLISECONDS) }
+            resetAudioMode()
+        }
+
+        private fun resetAudioMode() {
+            runCatching {
+                val audioManager = appContext.getSystemService(AudioManager::class.java) ?: return@runCatching
+                audioManager.isSpeakerphoneOn = false
+                audioManager.mode = AudioManager.MODE_NORMAL
+            }
         }
     }
 

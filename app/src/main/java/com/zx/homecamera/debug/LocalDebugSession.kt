@@ -59,7 +59,7 @@ class LocalDebugSession(private val context: Context) {
                         val connection = LanViewerConnector().connect(device, timeoutMillis = 5_000)
                         val localViewer = H264UdpViewer()
                         viewer = localViewer
-                        localViewer.start(connection, viewerSurface, onFirstFrame, onError)
+                        localViewer.start(context, connection, viewerSurface, onFirstFrame, onError)
                     } catch (e: Exception) {
                         Log.e(TAG, "Failed to start local viewer", e)
                         onError(e.message ?: "本地调试启动失败")

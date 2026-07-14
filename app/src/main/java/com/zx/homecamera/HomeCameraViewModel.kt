@@ -374,6 +374,7 @@ class HomeCameraViewModel(application: Application) : AndroidViewModel(applicati
             acquireWifiLock()
             viewerStreamKey = streamKey
             viewerStream.start(
+                context = getApplication(),
                 connection = connection,
                 surface = surface,
                 onFirstFrame = {

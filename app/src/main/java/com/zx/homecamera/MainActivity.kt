@@ -2,6 +2,7 @@ package com.zx.homecamera
 
 import android.Manifest
 import android.content.pm.PackageManager
+import android.content.res.Configuration
 import android.os.Build
 import android.os.Bundle
 import android.view.Surface
@@ -23,6 +24,7 @@ import androidx.core.content.ContextCompat
 import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
+import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.zx.homecamera.core.app.AppRole
 import com.zx.homecamera.core.app.HomeCameraAction
@@ -188,6 +190,16 @@ class MainActivity : ComponentActivity() {
                 )
             }
         }
+    }
+
+    override fun onConfigurationChanged(newConfig: Configuration) {
+        super.onConfigurationChanged(newConfig)
+        // configChanges 让旋转时不重建 Activity，这里同步刷新采集端旋转元数据，
+        // 否则 H.264 SPS/PPS 里的旋转角度会停留在首次进入时的值。
+        // Activity 未重建，ViewModelStore 不变，取到的是同一个 ViewModel 实例。
+        val viewModel = ViewModelProvider(this)[HomeCameraViewModel::class.java]
+        val degrees = CameraH264Streamer.rotationDegrees(display?.rotation ?: Surface.ROTATION_0)
+        viewModel.setDisplayRotationDegrees(degrees)
     }
 
     private fun collectorPermissions(): Array<String> =
