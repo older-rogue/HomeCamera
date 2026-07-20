@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Splash 冷启动窗口背景：底层纯白填满整个屏幕，上层为与 splash 页面一致的 logo+文字居中显示，消除黑边与跳变 -->
+<layer-list xmlns:android="http://schemas.android.com/apk/res/android">
+    <item android:drawable="@android:color/white" />
+    <item>
+        <bitmap
+            android:src="@drawable/splash_background"
+            android:gravity="center" />
+    </item>
+</layer-list>

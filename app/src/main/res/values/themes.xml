@@ -1,5 +1,27 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
 
-    <style name="Theme.HomeCamera" parent="android:Theme.Material.Light.NoActionBar" />
+    <style name="Theme.HomeCamera" parent="android:Theme.Material.Light.NoActionBar">
+        <item name="android:windowBackground">@android:color/white</item>
+        <item name="android:colorBackground">@android:color/white</item>
+    </style>
+
+    <!-- Activity 淡入淡出过渡动画 -->
+    <style name="Animation.HomeCamera" parent="@android:style/Animation.Activity">
+        <item name="android:activityOpenEnterAnimation">@anim/activity_fade_in</item>
+        <item name="android:activityOpenExitAnimation">@anim/activity_hold</item>
+        <item name="android:activityCloseEnterAnimation">@anim/activity_hold</item>
+        <item name="android:activityCloseExitAnimation">@anim/activity_fade_out</item>
+    </style>
+
+    <!-- Splash 启动页专用主题：窗口背景为白底居中 logo（与 splash 页面一致），消除冷启动白屏与跳变；透明状态栏，全屏沉浸 -->
+    <style name="Theme.Splash" parent="Theme.HomeCamera">
+        <item name="android:windowBackground">@drawable/splash_window_background</item>
+        <!-- 禁用系统冷启动预览窗口：部分国产 ROM 用深色系统背景绘制预览，与白色 windowBackground 不一致会导致顶部出现黑条；禁用后等 Activity 自身窗口就绪再显示 -->
+        <item name="android:windowDisablePreview">true</item>
+        <item name="android:statusBarColor">@android:color/white</item>
+        <item name="android:navigationBarColor">@android:color/white</item>
+        <item name="android:windowLightStatusBar">true</item>
+        <item name="android:windowAnimationStyle">@style/Animation.HomeCamera</item>
+    </style>
 </resources>

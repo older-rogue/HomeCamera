@@ -5,38 +5,58 @@ import android.net.Uri
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
+import androidx.activity.enableEdgeToEdge
+import androidx.compose.animation.core.RepeatMode
+import androidx.compose.animation.core.animateFloat
+import androidx.compose.animation.core.infiniteRepeatable
+import androidx.compose.animation.core.rememberInfiniteTransition
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.Image
+import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.offset
+import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
-import androidx.compose.material3.AlertDialog
-import androidx.compose.material3.Button
+import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
-import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.shadow
+import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.core.view.WindowInsetsCompat
+import androidx.core.view.WindowInsetsControllerCompat
 import com.zx.homecamera.MainActivity
 import com.zx.homecamera.R
 import com.zx.homecamera.local.LocalData
 import com.zx.homecamera.network.ApiService
 import com.zx.homecamera.network.UpdateInfo
 import com.zx.homecamera.ui.theme.HomeCameraTheme
+import com.zx.homecamera.ui.theme.OnSurfaceDark
+import com.zx.homecamera.ui.theme.OnSurfaceVariant
+import com.zx.homecamera.ui.theme.PrimarySoft
+import com.zx.homecamera.ui.theme.Purple40
 import com.zx.homecamera.utils.StatusBarUtil
 
 /**
@@ -115,31 +135,8 @@ private fun SplashScreen(
 
     Surface(
         modifier = Modifier.fillMaxSize(),
-        color = Color.White,
+        color = Color.Transparent,
     ) {
-        Box(
-            modifier = Modifier.fillMaxSize(),
-            contentAlignment = Alignment.Center,
-        ) {
-            Column(
-                horizontalAlignment = Alignment.CenterHorizontally,
-                verticalArrangement = Arrangement.Center,
-            ) {
-                Image(
-                    painter = painterResource(id = R.mipmap.ic_launcher),
-                    contentDescription = null,
-                    modifier = Modifier.size(96.dp),
-                )
-                Spacer(modifier = Modifier.height(16.dp))
-                Text(
-                    text = "HomeCamera",
-                    fontSize = 20.sp,
-                    fontWeight = FontWeight.Bold,
-                    color = Color.Black,
-                )
-            }
-        }
-
         // 展示更新弹窗
         UpdateDialogHolder.Content {
             // 弹窗跳过后无额外操作，主流程已由 SplashActivity.navigateToNextScreen 处理
@@ -168,44 +165,103 @@ private object UpdateDialogHolder {
         val info by current
 
         info?.let { updateInfo ->
-            AlertDialog(
-                onDismissRequest = {
-                    current.value = null
-                    dismissCallback?.invoke()
-                    dismissCallback = null
-                    onSkip()
-                },
-                title = {
-                    Text(text = "发现新版本 ${updateInfo.buildVersion}")
-                },
-                text = {
-                    Text(text = updateInfo.buildUpdateDescription)
-                },
-                confirmButton = {
-                    Button(onClick = {
-                        val url = updateInfo.appUrl
-                        if (url.isNotEmpty()) {
-                            val intent = Intent(Intent.ACTION_VIEW, Uri.parse(url))
-                                .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-                            context.startActivity(intent)
-                        }
-                        // 跳转下载后退出应用，等待用户安装新版本
-                        (context as? android.app.Activity)?.finish()
-                    }) {
-                        Text(text = "立即更新")
-                    }
-                },
-                dismissButton = {
-                    TextButton(onClick = {
+            // 半透明遮罩
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .background(Color.Black.copy(alpha = 0.5f))
+                    .clickable(
+                        interactionSource = androidx.compose.foundation.interaction.MutableInteractionSource(),
+                        indication = null,
+                    ) {
                         current.value = null
                         dismissCallback?.invoke()
                         dismissCallback = null
                         onSkip()
-                    }) {
-                        Text(text = "暂不更新")
+                    },
+                contentAlignment = Alignment.Center,
+            ) {
+                Column(
+                    modifier = Modifier
+                        .padding(horizontal = 20.dp)
+                        .width(300.dp)
+                        .clip(RoundedCornerShape(16.dp))
+                        .background(Color.White)
+                        .padding(start = 20.dp, end = 20.dp, top = 22.dp, bottom = 16.dp)
+                        .clickable(
+                            interactionSource = androidx.compose.foundation.interaction.MutableInteractionSource(),
+                            indication = null,
+                            onClick = {},
+                        ),
+                ) {
+                    Text(
+                        text = "发现新版本 ${updateInfo.buildVersion}",
+                        fontSize = 17.sp,
+                        fontWeight = FontWeight.SemiBold,
+                        color = OnSurfaceDark,
+                    )
+                    Spacer(modifier = Modifier.height(10.dp))
+                    Text(
+                        text = updateInfo.buildUpdateDescription,
+                        fontSize = 13.sp,
+                        color = OnSurfaceVariant,
+                        lineHeight = 21.sp,
+                    )
+                    Spacer(modifier = Modifier.height(18.dp))
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.End,
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        // 暂不更新
+                        Box(
+                            modifier = Modifier
+                                .clip(RoundedCornerShape(20.dp))
+                                .clickable {
+                                    current.value = null
+                                    dismissCallback?.invoke()
+                                    dismissCallback = null
+                                    onSkip()
+                                }
+                                .padding(horizontal = 16.dp, vertical = 9.dp),
+                            contentAlignment = Alignment.Center,
+                        ) {
+                            Text(
+                                text = "暂不更新",
+                                color = Purple40,
+                                fontSize = 14.sp,
+                                fontWeight = FontWeight.Medium,
+                            )
+                        }
+                        Spacer(modifier = Modifier.width(6.dp))
+                        // 立即更新
+                        Box(
+                            modifier = Modifier
+                                .clip(RoundedCornerShape(20.dp))
+                                .background(Purple40)
+                                .clickable {
+                                    val url = updateInfo.appUrl
+                                    if (url.isNotEmpty()) {
+                                        val intent = Intent(Intent.ACTION_VIEW, Uri.parse(url))
+                                            .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                                        context.startActivity(intent)
+                                    }
+                                    // 跳转下载后退出应用，等待用户安装新版本
+                                    (context as? android.app.Activity)?.finish()
+                                }
+                                .padding(horizontal = 16.dp, vertical = 9.dp),
+                            contentAlignment = Alignment.Center,
+                        ) {
+                            Text(
+                                text = "立即更新",
+                                color = Color.White,
+                                fontSize = 14.sp,
+                                fontWeight = FontWeight.Medium,
+                            )
+                        }
                     }
-                },
-            )
+                }
+            }
         }
     }
 }

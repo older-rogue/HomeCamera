@@ -25,12 +25,16 @@ import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.text.SpanStyle
+import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.zx.homecamera.MainActivity
 import com.zx.homecamera.local.LocalData
 import com.zx.homecamera.ui.theme.HomeCameraTheme
+import com.zx.homecamera.ui.theme.Purple40
 import com.zx.homecamera.utils.StatusBarUtil
 
 /**
@@ -73,11 +77,11 @@ private fun IntroScreen(
             // 顶部标题
             Text(
                 text = "请大家认真阅读",
-                fontSize = 24.sp,
+                fontSize = 22.sp,
                 fontWeight = FontWeight.Bold,
                 color = Color.Black,
                 modifier = Modifier
-                    .padding(top = 32.dp, bottom = 8.dp)
+                    .padding(top = 28.dp, bottom = 6.dp)
                     .align(Alignment.CenterHorizontally),
             )
 
@@ -89,11 +93,25 @@ private fun IntroScreen(
                     .padding(horizontal = 20.dp, vertical = 12.dp),
             ) {
                 introParagraphs.forEachIndexed { index, paragraph ->
+                    val annotated = buildAnnotatedString {
+                        val url = "https://github.com/older-rogue/HomeCamera"
+                        val pos = paragraph.indexOf(url)
+                        if (pos >= 0) {
+                            append(paragraph.substring(0, pos))
+                            withStyle(SpanStyle(color = Purple40)) {
+                                append(url)
+                            }
+                            append(paragraph.substring(pos + url.length))
+                        } else {
+                            append(paragraph)
+                        }
+                    }
                     Text(
-                        text = paragraph,
+                        text = annotated,
                         fontSize = 14.sp,
+                        lineHeight = 24.sp,
                         color = Color.Black,
-                        modifier = Modifier.padding(top = if (index == 0) 8.dp else 16.dp),
+                        modifier = Modifier.padding(top = if (index == 0) 6.dp else 14.dp),
                     )
                 }
             }
@@ -137,7 +155,7 @@ private fun IntroScreen(
                 ) {
                     Text(
                         text = "同意并继续",
-                        color = Color(0xFF018786),
+                        color = Purple40,
                         fontWeight = FontWeight.Bold,
                         fontSize = 15.sp,
                     )

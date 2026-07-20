@@ -120,17 +120,30 @@ class CollectorForegroundService : Service() {
     }
 
     private fun stopCollector(startId: Int) {
+        // 通过 startForegroundService() 拉起本服务来执行 STOP 时，系统要求在 5s 内
+        // 调用 startForeground()，否则抛出 ForegroundServiceDidNotStartInTimeException。
+        // 这里先以一条临时通知（与启动一致的带类型前台）满足系统约束，再按 lifecycle 决策走停止流程。
+        startCollectorForeground(isCollecting = false)
+
         val decision = lifecycle.onStop(startId)
-        if (decision.shouldReleaseResources) {
-            releaseCollectorResources()
-            stopForeground(STOP_FOREGROUND_REMOVE)
-            sendStatusBroadcast(STATUS_STOPPED)
-        }
-        if (decision.shouldKeepServiceForeground) {
-            startForeground(NOTIFICATION_ID, buildNotification(isCollecting = false))
-        }
-        if (decision.shouldRequestServiceStop) {
-            lifecycle.onServiceStopResult(startId, stopSelfResult(startId))
+        when {
+            decision.shouldReleaseResources -> {
+                // 正常停止：释放资源、移除通知、广播停止、结束自身。
+                releaseCollectorResources()
+                stopForeground(STOP_FOREGROUND_REMOVE)
+                sendStatusBroadcast(STATUS_STOPPED)
+                lifecycle.onServiceStopResult(startId, stopSelfResult(startId))
+            }
+            !decision.isRunning -> {
+                // 服务本就未运行（如重复 STOP）：清场后结束自身。
+                stopForeground(STOP_FOREGROUND_REMOVE)
+                lifecycle.onServiceStopResult(startId, stopSelfResult(startId))
+            }
+            else -> {
+                // 过时的 STOP（已有更新的 START 把服务重新拉起）：保持运行状态，
+                // 将通知恢复为「运行中」，避免误显示为已停止。
+                startCollectorForeground(isCollecting = true)
+            }
         }
     }
 
@@ -293,7 +306,7 @@ class CollectorForegroundService : Service() {
             )
         }
         return NotificationCompat.Builder(this, CHANNEL_ID)
-            .setSmallIcon(R.mipmap.ic_launcher)
+            .setSmallIcon(R.drawable.ic_collector)
             .setContentTitle(
                 if (isCollecting) {
                     "HomeCamera 采集端运行中"
