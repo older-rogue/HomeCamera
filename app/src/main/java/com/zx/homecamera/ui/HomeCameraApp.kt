@@ -53,7 +53,6 @@ import androidx.activity.compose.BackHandler
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontWeight
@@ -91,8 +90,6 @@ fun HomeCameraApp(
     viewerConnection: ViewerConnection? = null,
     onViewerSurfaceReady: (Surface) -> Unit = {},
     onViewerSurfaceDestroyed: () -> Unit = {},
-    onLocalDebugViewerSurfaceReady: (Surface) -> Unit = {},
-    onLocalDebugViewerSurfaceDestroyed: () -> Unit = {},
     onExitApp: () -> Unit = {},
 ) {
     var collectorPreviewWidth by rememberSaveable(collectorInitialPreviewSize) {
@@ -134,7 +131,6 @@ fun HomeCameraApp(
                 Screen.Viewer -> HomeCameraAction.BackToClientList
                 Screen.ClientList -> HomeCameraAction.BackToRoleSelection
                 Screen.Collector -> HomeCameraAction.BackToRoleSelection
-                Screen.LocalDebug -> HomeCameraAction.ExitLocalDebug
                 Screen.RoleSelection -> HomeCameraAction.BackToRoleSelection
             },
         )
@@ -144,20 +140,17 @@ fun HomeCameraApp(
         .fillMaxSize()
         .statusBarsPadding()
     ) {
-        // 通用 TopAppBar（客户端 / 采集端 / 本地调试有返回按钮，模式选择仅标题）
+        // 通用 TopAppBar（客户端 / 采集端有返回按钮，模式选择页仅标题）
         val title = when (state.screen) {
             Screen.RoleSelection -> "HomeCamera"
             Screen.Collector -> "采集端"
             Screen.ClientList -> "客户端"
             Screen.Viewer -> "实时观看"
-            Screen.LocalDebug -> "本地调试"
         }
         val showBack = state.screen == Screen.Collector ||
-            state.screen == Screen.LocalDebug ||
             state.screen == Screen.ClientList
         val onBackAction: HomeCameraAction = when (state.screen) {
             Screen.ClientList -> HomeCameraAction.BackToRoleSelection
-            Screen.LocalDebug -> HomeCameraAction.ExitLocalDebug
             else -> HomeCameraAction.BackToRoleSelection
         }
         AppTopBar(
@@ -183,15 +176,6 @@ fun HomeCameraApp(
                 )
                 Screen.ClientList -> ClientListScreen(state.client, onAction)
                 Screen.Viewer -> Unit
-                Screen.LocalDebug -> LocalDebugScreen(
-                    state = state.localDebug,
-                    onAction = onAction,
-                    onCollectorSurfaceReady = onCollectorSurfaceReady,
-                    onCollectorSurfaceDestroyed = onCollectorSurfaceDestroyed,
-                    collectorPreviewSize = collectorPreviewSize,
-                    onViewerSurfaceReady = onLocalDebugViewerSurfaceReady,
-                    onViewerSurfaceDestroyed = onLocalDebugViewerSurfaceDestroyed,
-                )
             }
         }
     }
@@ -263,13 +247,6 @@ private fun RoleSelectionScreen(onAction: (HomeCameraAction) -> Unit) {
             primary = false,
             onClick = { onAction(HomeCameraAction.SelectRole(AppRole.Client)) },
         )
-//        RoleCard(
-//            iconRes = R.drawable.ic_debug,
-//            name = "本地调试",
-//            sub = "同机自测采集与播放",
-//            primary = false,
-//            onClick = { onAction(HomeCameraAction.EnterLocalDebug) },
-//        )
     }
 }
 
@@ -932,138 +909,6 @@ private class RotatedViewerTextureLayout(context: Context) : FrameLayout(context
             MeasureSpec.makeMeasureSpec(size.width, MeasureSpec.EXACTLY),
             MeasureSpec.makeMeasureSpec(size.height, MeasureSpec.EXACTLY),
         )
-    }
-}
-
-@Composable
-private fun LocalDebugScreen(
-    state: ViewerState,
-    onAction: (HomeCameraAction) -> Unit,
-    onCollectorSurfaceReady: (SurfaceHolder, Int, Int) -> Unit,
-    onCollectorSurfaceDestroyed: () -> Unit,
-    collectorPreviewSize: VideoSize,
-    onViewerSurfaceReady: (Surface) -> Unit,
-    onViewerSurfaceDestroyed: () -> Unit,
-) {
-    Column(
-        modifier = Modifier
-            .fillMaxSize()
-            .verticalScroll(rememberScrollState()),
-        verticalArrangement = Arrangement.spacedBy(10.dp),
-    ) {
-        Text(
-            text = "采集端预览",
-            style = MaterialTheme.typography.titleSmall,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-            fontSize = 13.sp,
-            fontWeight = FontWeight.Medium,
-        )
-        Box(
-            modifier = Modifier
-                .fillMaxWidth()
-                .aspectRatio(collectorPreviewSize.width.toFloat() / collectorPreviewSize.height.toFloat())
-                .clip(RoundedCornerShape(12.dp))
-                .background(Color.Black),
-            contentAlignment = Alignment.Center,
-        ) {
-            AndroidView(
-                modifier = Modifier.fillMaxSize(),
-                factory = { context ->
-                    CenterCropSurfaceLayout(context).apply {
-                        onContainerChanged = { holder, width, height ->
-                            onCollectorSurfaceReady(holder, width, height)
-                        }
-                        surfaceView.holder.addCallback(
-                            object : SurfaceHolder.Callback {
-                                override fun surfaceCreated(holder: SurfaceHolder) {
-                                    onCollectorSurfaceReady(holder, this@apply.width, this@apply.height)
-                                }
-                                override fun surfaceChanged(holder: SurfaceHolder, format: Int, width: Int, height: Int) {
-                                    onCollectorSurfaceReady(holder, this@apply.width, this@apply.height)
-                                }
-                                override fun surfaceDestroyed(holder: SurfaceHolder) {
-                                    onCollectorSurfaceDestroyed()
-                                }
-                            },
-                        )
-                    }
-                },
-                update = { layout ->
-                    layout.updatePreviewSize(collectorPreviewSize.width, collectorPreviewSize.height)
-                },
-            )
-        }
-
-        Text(
-            text = "客户端画面",
-            style = MaterialTheme.typography.titleSmall,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-            fontSize = 13.sp,
-            fontWeight = FontWeight.Medium,
-        )
-        Box(
-            modifier = Modifier
-                .fillMaxWidth()
-                .aspectRatio(3f / 4f)
-                .clip(RoundedCornerShape(12.dp))
-                .background(Color.Black),
-            contentAlignment = Alignment.Center,
-        ) {
-            val surfaceSize = VideoSize(640, 480)
-            AndroidView(
-                modifier = Modifier.fillMaxSize(),
-                factory = { context ->
-                    RotatedViewerTextureLayout(context).apply {
-                        updateConfig(surfaceSize, 0f)
-                        this.onSurfaceAvailable = onViewerSurfaceReady
-                        this.onSurfaceDestroyed = onViewerSurfaceDestroyed
-                    }
-                },
-                update = { layout ->
-                    layout.onSurfaceAvailable = onViewerSurfaceReady
-                    layout.onSurfaceDestroyed = onViewerSurfaceDestroyed
-                    layout.updateConfig(surfaceSize, 0f)
-                },
-            )
-            if (state.status != ViewerStatus.Playing) {
-                Text(
-                    text = state.status.label(),
-                    color = Color.White,
-                    style = MaterialTheme.typography.titleMedium,
-                )
-            }
-        }
-
-        Row(
-            modifier = Modifier.padding(top = 6.dp),
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            StatusDot(if (state.status == ViewerStatus.Playing) StatusDot.Active else StatusDot.Gray)
-            Spacer(Modifier.width(8.dp))
-            Text(text = "状态: ${state.status.label()}", fontSize = 14.sp)
-        }
-        state.errorMessage?.let {
-            Text(text = it, color = MaterialTheme.colorScheme.error, fontSize = 14.sp)
-        }
-
-        // 退出调试（胶囊描边按钮）
-        Box(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(top = 8.dp)
-                .height(44.dp)
-                .clip(RoundedCornerShape(24.dp))
-                .border(1.5.dp, MaterialTheme.colorScheme.primary, RoundedCornerShape(24.dp))
-                .clickable { onAction(HomeCameraAction.ExitLocalDebug) },
-            contentAlignment = Alignment.Center,
-        ) {
-            Text(
-                text = "退出调试",
-                color = MaterialTheme.colorScheme.primary,
-                fontSize = 15.sp,
-                fontWeight = FontWeight.Medium,
-            )
-        }
     }
 }
 

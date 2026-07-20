@@ -5,7 +5,6 @@ import com.zx.homecamera.core.app.CollectorDevice
 import java.net.ConnectException
 import java.net.InetSocketAddress
 import java.net.NoRouteToHostException
-import java.net.Socket
 import java.net.SocketTimeoutException
 import java.util.concurrent.Callable
 import java.util.concurrent.ConcurrentHashMap

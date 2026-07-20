@@ -41,8 +41,8 @@ object H264StreamConfigSelector {
         return H264StreamSelection(
             bufferSize = bufferSize,
             displaySize = displaySize,
-            fps = fpsFor(bufferSize),
-            bitrate = bitrateFor(bufferSize),
+            fps = H264StreamConfig.FPS,
+            bitrate = H264StreamConfig.BITRATE,
             iFrameIntervalSeconds = H264StreamConfig.I_FRAME_INTERVAL_SECONDS,
         )
     }
@@ -71,18 +71,4 @@ object H264StreamConfigSelector {
             aspectPenalty + areaPenalty
         }
     }
-
-    private fun fpsFor(size: VideoSize): Int =
-        if (size.area <= VideoSize(H264StreamConfig.WIDTH, H264StreamConfig.HEIGHT).area) {
-            H264StreamConfig.FPS
-        } else {
-            20
-        }
-
-    private fun bitrateFor(size: VideoSize): Int =
-        if (size.area <= VideoSize(H264StreamConfig.WIDTH, H264StreamConfig.HEIGHT).area) {
-            H264StreamConfig.BITRATE
-        } else {
-            2_400_000
-        }
 }

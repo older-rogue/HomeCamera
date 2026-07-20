@@ -16,7 +16,6 @@ import com.zx.homecamera.core.app.HomeCameraAction
 import com.zx.homecamera.core.app.HomeCameraReducer
 import com.zx.homecamera.core.app.HomeCameraState
 import com.zx.homecamera.core.app.ViewerStatus
-import com.zx.homecamera.debug.LocalDebugSession
 import com.zx.homecamera.network.H264UdpViewer
 import com.zx.homecamera.network.LanViewerConnector
 import com.zx.homecamera.network.logNet
@@ -25,11 +24,7 @@ import com.zx.homecamera.network.TcpSubnetScanner
 import com.zx.homecamera.network.ViewerConnection
 import com.zx.homecamera.network.WifiSubnetProvider
 import com.zx.homecamera.service.CollectorForegroundService
-import com.zx.homecamera.video.CameraH264Streamer
 import com.zx.homecamera.video.CollectorCameraRuntime
-import com.zx.homecamera.video.H264StreamConfig
-import com.zx.homecamera.video.PreviewSize
-import com.zx.homecamera.video.VideoSize
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -48,7 +43,6 @@ class HomeCameraViewModel(application: Application) : AndroidViewModel(applicati
     private val scanGeneration = AtomicLong()
     private val viewerGeneration = AtomicLong()
     private var scanFuture: Future<*>? = null
-    private var localDebugSession: LocalDebugSession? = null
     private var wifiLock: WifiManager.WifiLock? = null
 
     private val _viewerConnectionState = MutableStateFlow<ViewerConnection?>(null)
@@ -173,22 +167,6 @@ class HomeCameraViewModel(application: Application) : AndroidViewModel(applicati
                 viewerConnection = null
                 viewerSurface = null
                 viewerStreamKey = null
-                localDebugSession?.stop()
-                localDebugSession = null
-                _state.value = HomeCameraReducer.reduce(_state.value, action)
-            }
-
-            HomeCameraAction.EnterLocalDebug -> {
-                _state.value = HomeCameraReducer.reduce(_state.value, action)
-            }
-
-            HomeCameraAction.ExitLocalDebug -> {
-                localDebugSession?.stop()
-                localDebugSession = null
-                _state.value = HomeCameraReducer.reduce(_state.value, action)
-            }
-
-            is HomeCameraAction.LocalDebugStatusChanged -> {
                 _state.value = HomeCameraReducer.reduce(_state.value, action)
             }
 
@@ -230,62 +208,6 @@ class HomeCameraViewModel(application: Application) : AndroidViewModel(applicati
 
     fun setDisplayRotationDegrees(degrees: Int) {
         CollectorCameraRuntime.setDisplayRotationDegrees(degrees)
-    }
-
-    fun setCollectorPreviewSurface(holder: android.view.SurfaceHolder?, width: Int, height: Int) {
-        CollectorCameraRuntime.setPreviewSurface(holder, width, height)
-    }
-
-    fun clearCollectorPreviewSurface() {
-        CollectorCameraRuntime.setPreviewSurface(null)
-    }
-
-    fun setCollectorPreviewSizeListener(listener: ((VideoSize) -> Unit)?) {
-        CollectorCameraRuntime.setPreviewDisplaySizeListener(listener)
-    }
-
-    fun startLocalDebugSession(surface: Surface) {
-        localDebugSession?.stop()
-        val session = LocalDebugSession(getApplication())
-        localDebugSession = session
-        runCatching {
-            session.start(
-                viewerSurface = surface,
-                onFirstFrame = {
-                    viewModelScope.launch {
-                        _state.value = HomeCameraReducer.reduce(
-                            _state.value,
-                            HomeCameraAction.LocalDebugStatusChanged(ViewerStatus.Playing),
-                        )
-                    }
-                },
-                onError = { message ->
-                    viewModelScope.launch {
-                        _state.value = HomeCameraReducer.reduce(
-                            _state.value,
-                            HomeCameraAction.LocalDebugStatusChanged(ViewerStatus.Error, message),
-                        )
-                    }
-                },
-            )
-        }.onFailure { error ->
-            if (localDebugSession == session) {
-                session.stop()
-                localDebugSession = null
-            }
-            _state.value = HomeCameraReducer.reduce(
-                _state.value,
-                HomeCameraAction.LocalDebugStatusChanged(
-                    ViewerStatus.Error,
-                    error.message ?: "本地调试启动失败",
-                ),
-            )
-        }
-    }
-
-    fun stopLocalDebugSession() {
-        localDebugSession?.stop()
-        localDebugSession = null
     }
 
     private fun scanCollectors() {
@@ -496,8 +418,6 @@ class HomeCameraViewModel(application: Application) : AndroidViewModel(applicati
         cancelScan()
         viewerStream.stop()
         releaseWifiLock()
-        localDebugSession?.stop()
-        localDebugSession = null
         scannerExecutor.shutdownNow()
         viewerExecutor.shutdownNow()
         try {

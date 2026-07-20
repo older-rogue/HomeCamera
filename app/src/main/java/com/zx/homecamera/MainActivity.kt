@@ -48,7 +48,6 @@ class MainActivity : ComponentActivity() {
             val state by viewModel.state.collectAsState()
             val viewerConnection by viewModel.viewerConnectionState.collectAsState()
             var collectorPreviewSize by remember { mutableStateOf(defaultCollectorPreviewSize()) }
-            var permissionRequestTarget by remember { mutableStateOf<PermissionRequestTarget?>(null) }
             val context = LocalContext.current
 
             fun displayRotationDegrees(): Int =
@@ -93,30 +92,16 @@ class MainActivity : ComponentActivity() {
             val permissionLauncher = rememberLauncherForActivityResult(
                 contract = ActivityResultContracts.RequestMultiplePermissions(),
             ) { grants ->
-                val target = permissionRequestTarget
-                permissionRequestTarget = null
                 if (grants[Manifest.permission.CAMERA] != true) {
-                    val message = when (target) {
-                        PermissionRequestTarget.LocalDebug -> "摄像头权限被拒绝，无法启动本地调试"
-                        else -> "摄像头权限被拒绝，无法启动采集端"
-                    }
-                    when (target) {
-                        PermissionRequestTarget.LocalDebug -> viewModel.onAction(
-                            HomeCameraAction.LocalDebugStatusChanged(ViewerStatus.Error, message),
-                        )
-                        else -> viewModel.onAction(HomeCameraAction.CollectorFailed(message))
-                    }
+                    viewModel.onAction(
+                        HomeCameraAction.CollectorFailed("摄像头权限被拒绝，无法启动采集端"),
+                    )
                     return@rememberLauncherForActivityResult
                 }
 
                 preselectCollectorPreviewSize()
-                when (target) {
-                    PermissionRequestTarget.LocalDebug -> viewModel.onAction(HomeCameraAction.EnterLocalDebug)
-                    else -> {
-                        viewModel.onAction(HomeCameraAction.StartCollector)
-                        viewModel.startCollectorService()
-                    }
-                }
+                viewModel.onAction(HomeCameraAction.StartCollector)
+                viewModel.startCollectorService()
             }
 
             val ensureCollectorPermissionsAndStart = {
@@ -130,7 +115,6 @@ class MainActivity : ComponentActivity() {
                     viewModel.startCollectorService()
                 } else {
                     preselectCollectorPreviewSize()
-                    permissionRequestTarget = PermissionRequestTarget.Collector
                     permissionLauncher.launch(permissions)
                 }
             }
@@ -153,10 +137,6 @@ class MainActivity : ComponentActivity() {
                                 viewModel.stopCollectorService()
                                 viewModel.onAction(action)
                             }
-                            HomeCameraAction.EnterLocalDebug -> {
-                                permissionRequestTarget = PermissionRequestTarget.LocalDebug
-                                permissionLauncher.launch(collectorPermissions())
-                            }
                             else -> viewModel.onAction(action)
                         }
                     },
@@ -176,12 +156,6 @@ class MainActivity : ComponentActivity() {
                     },
                     onViewerSurfaceDestroyed = {
                         viewModel.onViewerSurfaceDestroyed()
-                    },
-                    onLocalDebugViewerSurfaceReady = { surface ->
-                        viewModel.startLocalDebugSession(surface)
-                    },
-                    onLocalDebugViewerSurfaceDestroyed = {
-                        viewModel.stopLocalDebugSession()
                     },
                     onExitApp = {
                         viewModel.stopCollectorService()
@@ -214,10 +188,5 @@ class MainActivity : ComponentActivity() {
     private fun defaultCollectorPreviewSize(): PreviewSize {
         val size = VideoSize(H264StreamConfig.WIDTH, H264StreamConfig.HEIGHT)
         return PreviewSize(bufferSize = size, displaySize = size)
-    }
-
-    private enum class PermissionRequestTarget {
-        Collector,
-        LocalDebug,
     }
 }

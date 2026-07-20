@@ -27,9 +27,6 @@ class Mp4SegmentRecorder(
     private val segmentCounter = AtomicInteger(0)
     private var lastErrorReportAtMillis = 0L
 
-    val recordingRoot: File
-        get() = root
-
     @Synchronized
     fun onOutputFormatChanged(format: MediaFormat) {
         outputFormat = MediaFormat(format)
