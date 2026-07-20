@@ -20,14 +20,14 @@ class ApiService private constructor() {
 
         // ====== 以下地址/密钥为占位，请自行填写 ======
 
-        /** 更新检查接口地址（蒲公英风格：https://api.pgyer.com/apiv2/app/check） */
-        private const val UPDATE_CHECK_URL = ""
+        /** 更新检查接口地址 */
+        private const val UPDATE_CHECK_URL = "https://www.pgyer.com/apiv2/app/check"
 
         /** 蒲公英 API Key */
         private const val API_KEY = "56eac30dc043da146b8b834b88ab1ff8"
 
         /** 蒲公英 App Key */
-        private const val APP_KEY = ""
+        private const val APP_KEY = "fcdaec5f20d465f244d3df154f29574b"
 
         // =============================================
 

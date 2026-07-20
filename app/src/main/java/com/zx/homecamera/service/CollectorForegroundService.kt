@@ -336,7 +336,11 @@ class CollectorForegroundService : Service() {
     }
 
     private fun sendStatusBroadcast(status: String, extraKey: String? = null, extraValue: String? = null) {
+        // 限定到本应用包名：Android 13+ 注册接收器时使用 RECEIVER_NOT_EXPORTED，
+        // 若发送侧仍用不带 setPackage 的隐式广播，在 Android 14/16 上不会被投递
+        // 给 NOT_EXPORTED 接收器，导致采集端状态（服务/连接/录像）无法同步到 UI。
         val intent = Intent(ACTION_COLLECTOR_STATUS).apply {
+            setPackage(packageName)
             putExtra(EXTRA_STATUS, status)
             extraKey?.let { putExtra(it, extraValue ?: "") }
         }
