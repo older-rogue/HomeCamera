@@ -18,6 +18,7 @@ import com.zx.homecamera.core.app.HomeCameraState
 import com.zx.homecamera.core.app.ViewerStatus
 import com.zx.homecamera.network.H264UdpViewer
 import com.zx.homecamera.network.LanViewerConnector
+import com.zx.homecamera.network.RecordingApiClient
 import com.zx.homecamera.network.logNet
 import com.zx.homecamera.network.SocketTcpPortConnector
 import com.zx.homecamera.network.TcpSubnetScanner
@@ -25,10 +26,12 @@ import com.zx.homecamera.network.ViewerConnection
 import com.zx.homecamera.network.WifiSubnetProvider
 import com.zx.homecamera.service.CollectorForegroundService
 import com.zx.homecamera.video.CollectorCameraRuntime
+import com.zx.homecamera.core.protocol.RecordingEntry
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
+import java.io.File
 import java.util.concurrent.Executors
 import java.util.concurrent.Future
 import java.util.concurrent.atomic.AtomicLong
@@ -39,7 +42,9 @@ class HomeCameraViewModel(application: Application) : AndroidViewModel(applicati
 
     private val scannerExecutor = Executors.newSingleThreadExecutor()
     private val viewerExecutor = Executors.newSingleThreadExecutor()
+    private val recordingExecutor = Executors.newSingleThreadExecutor()
     private val viewerStream = H264UdpViewer()
+    private val recordingApi = RecordingApiClient()
     private val scanGeneration = AtomicLong()
     private val viewerGeneration = AtomicLong()
     private var scanFuture: Future<*>? = null
@@ -170,6 +175,47 @@ class HomeCameraViewModel(application: Application) : AndroidViewModel(applicati
                 _state.value = HomeCameraReducer.reduce(_state.value, action)
             }
 
+            HomeCameraAction.OpenRecordingLibrary -> {
+                _state.value = HomeCameraReducer.reduce(_state.value, action)
+                loadRecordingDates()
+            }
+
+            HomeCameraAction.RefreshRecordingLibrary -> {
+                val selectedDate = _state.value.recordingLibrary.selectedDate
+                if (selectedDate != null) {
+                    loadRecordingFiles(selectedDate)
+                } else {
+                    loadRecordingDates()
+                }
+            }
+
+            is HomeCameraAction.SelectRecordingDate -> {
+                _state.value = HomeCameraReducer.reduce(_state.value, action)
+                loadRecordingFiles(action.date)
+            }
+
+            is HomeCameraAction.DownloadRecording -> {
+                _state.value = HomeCameraReducer.reduce(_state.value, action)
+                downloadRecordingToGallery(action.fileId)
+            }
+
+            is HomeCameraAction.OpenRecordingPlayback -> {
+                _state.value = HomeCameraReducer.reduce(_state.value, action)
+                loadRecordingForPlayback(action.fileId)
+            }
+
+            HomeCameraAction.BackToViewer -> {
+                _state.value = HomeCameraReducer.reduce(_state.value, action)
+            }
+
+            HomeCameraAction.BackToRecordingLibrary -> {
+                _state.value = HomeCameraReducer.reduce(_state.value, action)
+            }
+
+            HomeCameraAction.SavePlaybackToGallery -> {
+                savePlaybackToGallery()
+            }
+
             else -> {
                 _state.value = HomeCameraReducer.reduce(_state.value, action)
             }
@@ -265,6 +311,166 @@ class HomeCameraViewModel(application: Application) : AndroidViewModel(applicati
                 )
             }
         }
+    }
+
+    private fun selectedDevice(): CollectorDevice? = _state.value.viewer.selectedDevice
+
+    private fun loadRecordingDates() {
+        val device = selectedDevice() ?: return
+        recordingExecutor.execute {
+            val result = runCatching { recordingApi.listDates(device) }
+            val dates = result.getOrDefault(emptyList())
+            val error = result.exceptionOrNull()?.message
+            viewModelScope.launch {
+                _state.value = HomeCameraReducer.reduce(
+                    _state.value,
+                    HomeCameraAction.RecordingDatesLoaded(dates, error),
+                )
+                // 默认加载第一个日期的文件列表
+                _state.value.recordingLibrary.selectedDate?.let { date ->
+                    loadRecordingFiles(date)
+                }
+            }
+        }
+    }
+
+    private fun loadRecordingFiles(date: String) {
+        val device = selectedDevice() ?: return
+        recordingExecutor.execute {
+            val result = runCatching { recordingApi.listFiles(device, date) }
+            val files = result.getOrDefault(emptyList())
+            val error = result.exceptionOrNull()?.message
+            viewModelScope.launch {
+                _state.value = HomeCameraReducer.reduce(
+                    _state.value,
+                    HomeCameraAction.RecordingFilesLoaded(date, files, error),
+                )
+            }
+        }
+    }
+
+    private fun downloadRecordingToGallery(fileId: String) {
+        val device = selectedDevice() ?: return
+        val context = getApplication<Application>()
+        val entry = _state.value.recordingLibrary.files.firstOrNull { it.fileId == fileId } ?: return
+        recordingExecutor.execute {
+            val result = runCatching {
+                recordingApi.downloadToGallery(
+                    context = context,
+                    device = device,
+                    entry = entry,
+                    onProgress = { transferred, total ->
+                        viewModelScope.launch {
+                            _state.value = HomeCameraReducer.reduce(
+                                _state.value,
+                                HomeCameraAction.DownloadProgressChanged(fileId, transferred, total),
+                            )
+                        }
+                    },
+                )
+            }
+            val error = result.exceptionOrNull()?.message ?: if (result.getOrNull() == null) "下载失败" else null
+            viewModelScope.launch {
+                _state.value = HomeCameraReducer.reduce(
+                    _state.value,
+                    HomeCameraAction.DownloadCompleted(fileId, error),
+                )
+            }
+        }
+    }
+
+    private fun loadRecordingForPlayback(fileId: String) {
+        val device = selectedDevice() ?: return
+        val context = getApplication<Application>()
+        recordingExecutor.execute {
+            val result = runCatching {
+                recordingApi.downloadToCache(
+                    device = device,
+                    fileId = fileId,
+                    cacheDir = context.cacheDir,
+                )
+            }
+            val file = result.getOrNull()
+            val error = if (file == null) result.exceptionOrNull()?.message ?: "加载录像失败" else null
+            viewModelScope.launch {
+                _state.value = HomeCameraReducer.reduce(
+                    _state.value,
+                    HomeCameraAction.RecordingPlaybackLoaded(fileId, file, error),
+                )
+            }
+        }
+    }
+
+    fun savePlaybackToGallery() {
+        val playback = _state.value.recordingPlayback
+        val cachedFile = playback.cachedFile ?: return
+        val device = selectedDevice() ?: return
+        val context = getApplication<Application>()
+        // 从 fileId 还原 RecordingEntry（播放所需信息）。播放缓存文件名包含 fileId 信息，
+        // 但下载到相册需要 sizeBytes/startMillis，这里用 cachedFile 大小兜底。
+        val entry = RecordingEntry(
+            fileId = playback.fileId,
+            sizeBytes = cachedFile.length(),
+            startMillis = 0L,
+        )
+        // 复用下载逻辑：先把 savingToGallery 置位，再走 RecordingApiClient。
+        _state.value = HomeCameraReducer.reduce(
+            _state.value,
+            HomeCameraAction.RecordingPlaybackSavedToGallery(false),
+        )
+        // 标记正在保存
+        _state.value = _state.value.copy(
+            recordingPlayback = _state.value.recordingPlayback.copy(savingToGallery = true, savedToGallery = false),
+        )
+        recordingExecutor.execute {
+            // 已有缓存文件，直接写入相册，不走网络。
+            val uri = runCatching {
+                writeCachedFileToGallery(context, cachedFile, entry.fileId)
+            }.getOrNull()
+            viewModelScope.launch {
+                _state.value = HomeCameraReducer.reduce(
+                    _state.value,
+                    HomeCameraAction.RecordingPlaybackSavedToGallery(uri != null),
+                )
+            }
+        }
+    }
+
+    private fun writeCachedFileToGallery(
+        context: Application,
+        cachedFile: File,
+        fileId: String,
+    ): android.net.Uri? {
+        val displayName = "HomeCamera_${fileId.replace('/', '_')}"
+        val resolver = context.contentResolver
+        val collection = android.provider.MediaStore.Video.Media
+            .getContentUri(android.provider.MediaStore.VOLUME_EXTERNAL_PRIMARY)
+        val values = android.content.ContentValues().apply {
+            put(android.provider.MediaStore.Video.Media.DISPLAY_NAME, displayName)
+            put(android.provider.MediaStore.Video.Media.MIME_TYPE, "video/mp4")
+            put(android.provider.MediaStore.Video.Media.RELATIVE_PATH, "${android.os.Environment.DIRECTORY_MOVIES}/HomeCamera")
+            if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.Q) {
+                put(android.provider.MediaStore.Video.Media.IS_PENDING, 1)
+            }
+        }
+        val uri = resolver.insert(collection, values) ?: return null
+        return runCatching {
+            resolver.openOutputStream(uri)?.use { output ->
+                cachedFile.inputStream().use { input ->
+                    input.copyTo(output)
+                }
+                output.flush()
+            } ?: throw IllegalStateException("cannot open output stream")
+            if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.Q) {
+                val finalValues = android.content.ContentValues().apply {
+                    put(android.provider.MediaStore.Video.Media.IS_PENDING, 0)
+                }
+                resolver.update(uri, finalValues, null, null)
+            }
+            uri
+        }.onFailure {
+            runCatching { resolver.delete(uri, null, null) }
+        }.getOrNull()
     }
 
     private fun connectViewerStream(device: CollectorDevice, maxAttempts: Int = 1) {
@@ -420,6 +626,7 @@ class HomeCameraViewModel(application: Application) : AndroidViewModel(applicati
         releaseWifiLock()
         scannerExecutor.shutdownNow()
         viewerExecutor.shutdownNow()
+        recordingExecutor.shutdownNow()
         try {
             getApplication<Application>().unregisterReceiver(serviceStatusReceiver)
         } catch (_: IllegalArgumentException) {

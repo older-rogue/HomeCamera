@@ -69,9 +69,9 @@ class MainActivity : ComponentActivity() {
                 onDispose {}
             }
 
-            DisposableEffect(state.screen == Screen.Viewer) {
+            DisposableEffect(state.screen == Screen.Viewer || state.screen == Screen.RecordingPlayback) {
                 val controller = WindowCompat.getInsetsController(window, window.decorView)
-                if (state.screen == Screen.Viewer) {
+                if (state.screen == Screen.Viewer || state.screen == Screen.RecordingPlayback) {
                     controller.systemBarsBehavior = WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
                     controller.hide(WindowInsetsCompat.Type.systemBars())
                 } else {

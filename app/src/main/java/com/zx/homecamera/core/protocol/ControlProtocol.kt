@@ -34,7 +34,41 @@ sealed interface ControlMessage {
     data class RequestKeyFrame(val reason: String) : ControlMessage
 
     data class Bye(val reason: String) : ControlMessage
+
+    /**
+     * 客户端请求录像列表。date 为空时返回所有可用日期；指定日期时返回该日期的文件列表。
+     */
+    data class ListRecordings(val date: String? = null) : ControlMessage
+
+    /**
+     * 采集端返回录像列表。dates 为所有可用日期；files 为（指定日期时的）文件列表。
+     */
+    data class RecordingList(
+        val dates: List<String>,
+        val files: List<RecordingEntry>,
+    ) : ControlMessage
+
+    /**
+     * 客户端请求打开某录像文件（用于播放或下载）。
+     */
+    data class OpenRecording(val fileId: String) : ControlMessage
+
+    /**
+     * 采集端为该文件开了一个独立 TCP 端口传字节流，客户端连接该端口拉取文件内容。
+     */
+    data class RecordingReady(
+        val fileId: String,
+        val sizeBytes: Long,
+        val transferPort: Int,
+    ) : ControlMessage
 }
+
+data class RecordingEntry(
+    val fileId: String,
+    val sizeBytes: Long,
+    val startMillis: Long,
+    val recording: Boolean = false,
+)
 
 object ControlProtocol {
     private const val PREFIX = "HOME_CAMERA_CONTROL"
@@ -83,6 +117,31 @@ object ControlProtocol {
             is ControlMessage.Bye -> listOf(
                 "type" to "BYE",
                 "reason" to message.reason,
+            )
+
+            is ControlMessage.ListRecordings -> buildList {
+                add("type" to "LIST_RECORDINGS")
+                message.date?.let { add("date" to it) }
+            }
+
+            is ControlMessage.RecordingList -> listOf(
+                "type" to "RECORDING_LIST",
+                "dates" to message.dates.joinToString(";"),
+                "files" to message.files.joinToString(";") { entry ->
+                    "${entry.fileId},${entry.sizeBytes},${entry.startMillis},${entry.recording}"
+                },
+            )
+
+            is ControlMessage.OpenRecording -> listOf(
+                "type" to "OPEN_RECORDING",
+                "fileId" to message.fileId,
+            )
+
+            is ControlMessage.RecordingReady -> listOf(
+                "type" to "RECORDING_READY",
+                "fileId" to message.fileId,
+                "sizeBytes" to message.sizeBytes.toString(),
+                "transferPort" to message.transferPort.toString(),
             )
         }
         return listOf(PREFIX, "version=$VERSION")
@@ -149,6 +208,34 @@ object ControlProtocol {
 
             "BYE" -> ControlMessage.Bye(
                 reason = fields["reason"] ?: return null,
+            )
+
+            "LIST_RECORDINGS" -> ControlMessage.ListRecordings(
+                date = fields["date"]?.takeIf { it.isNotEmpty() },
+            )
+
+            "RECORDING_LIST" -> ControlMessage.RecordingList(
+                dates = fields["dates"]?.split(";")?.filter { it.isNotEmpty() } ?: emptyList(),
+                files = fields["files"]?.split(";")?.filter { it.isNotEmpty() }?.mapNotNull { entry ->
+                    val parts = entry.split(",")
+                    if (parts.size < 3) return@mapNotNull null
+                    val fileId = parts[0]
+                    val sizeBytes = parts[1].toLongOrNull() ?: return@mapNotNull null
+                    val startMillis = parts[2].toLongOrNull() ?: return@mapNotNull null
+                    // 第 4 字段 recording 可选，兼容旧采集端只发 3 字段的情况
+                    val recording = parts.getOrNull(3)?.toBooleanStrictOrNull() ?: false
+                    RecordingEntry(fileId, sizeBytes, startMillis, recording)
+                } ?: emptyList(),
+            )
+
+            "OPEN_RECORDING" -> ControlMessage.OpenRecording(
+                fileId = fields["fileId"] ?: return null,
+            )
+
+            "RECORDING_READY" -> ControlMessage.RecordingReady(
+                fileId = fields["fileId"] ?: return null,
+                sizeBytes = fields["sizeBytes"]?.toLongOrNull() ?: return null,
+                transferPort = fields["transferPort"]?.toIntOrNull() ?: return null,
             )
 
             else -> null

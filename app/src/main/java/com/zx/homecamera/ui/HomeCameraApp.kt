@@ -2,11 +2,14 @@ package com.zx.homecamera.ui
 
 import android.content.Context
 import android.graphics.SurfaceTexture
+import android.media.MediaPlayer
+import android.net.Uri
 import android.view.Surface
 import android.view.SurfaceHolder
 import android.view.SurfaceView
 import android.view.TextureView
 import android.widget.FrameLayout
+import android.widget.VideoView
 import androidx.compose.animation.core.RepeatMode
 import androidx.compose.animation.core.animateFloat
 import androidx.compose.animation.core.infiniteRepeatable
@@ -33,6 +36,7 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
@@ -40,6 +44,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
+import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
@@ -47,6 +52,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.activity.compose.BackHandler
@@ -54,6 +60,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.tooling.preview.Preview
@@ -67,16 +74,25 @@ import com.zx.homecamera.core.app.CollectorDevice
 import com.zx.homecamera.core.app.CollectorState
 import com.zx.homecamera.core.app.HomeCameraAction
 import com.zx.homecamera.core.app.HomeCameraState
+import com.zx.homecamera.core.app.RecordingLibraryState
+import com.zx.homecamera.core.app.RecordingLibraryStatus
+import com.zx.homecamera.core.app.RecordingPlaybackState
+import com.zx.homecamera.core.app.RecordingPlaybackStatus
 import com.zx.homecamera.core.app.ScanStatus
 import com.zx.homecamera.core.app.Screen
 import com.zx.homecamera.core.app.ServiceStatus
 import com.zx.homecamera.core.app.ViewerState
 import com.zx.homecamera.core.app.ViewerStatus
+import com.zx.homecamera.core.protocol.RecordingEntry
 import com.zx.homecamera.network.ViewerConnection
 import com.zx.homecamera.ui.theme.HomeCameraTheme
 import com.zx.homecamera.ui.theme.Teal700
 import com.zx.homecamera.video.H264StreamConfig
 import com.zx.homecamera.video.VideoSize
+import java.io.File
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
 import kotlin.math.roundToInt
 
 @Composable
@@ -124,6 +140,26 @@ fun HomeCameraApp(
         return
     }
 
+    if (state.screen == Screen.RecordingLibrary) {
+        RecordingLibraryScreen(
+            state = state.recordingLibrary,
+            modifier = Modifier
+                .fillMaxSize()
+                .statusBarsPadding(),
+            onAction = onAction,
+        )
+        return
+    }
+
+    if (state.screen == Screen.RecordingPlayback) {
+        RecordingPlaybackScreen(
+            state = state.recordingPlayback,
+            modifier = Modifier.fillMaxSize(),
+            onAction = onAction,
+        )
+        return
+    }
+
     // 一级一级往回退：子页面拦截系统返回键回到上级，模式选择页才退出 App。
     BackHandler(enabled = state.screen != Screen.RoleSelection) {
         onAction(
@@ -131,6 +167,8 @@ fun HomeCameraApp(
                 Screen.Viewer -> HomeCameraAction.BackToClientList
                 Screen.ClientList -> HomeCameraAction.BackToRoleSelection
                 Screen.Collector -> HomeCameraAction.BackToRoleSelection
+                Screen.RecordingLibrary -> HomeCameraAction.BackToViewer
+                Screen.RecordingPlayback -> HomeCameraAction.BackToRecordingLibrary
                 Screen.RoleSelection -> HomeCameraAction.BackToRoleSelection
             },
         )
@@ -141,11 +179,12 @@ fun HomeCameraApp(
         .statusBarsPadding()
     ) {
         // 通用 TopAppBar（客户端 / 采集端有返回按钮，模式选择页仅标题）
+        // Viewer/RecordingLibrary/RecordingPlayback 已在上方提前 return，这里不会到达。
         val title = when (state.screen) {
             Screen.RoleSelection -> "HomeCamera"
             Screen.Collector -> "采集端"
             Screen.ClientList -> "客户端"
-            Screen.Viewer -> "实时观看"
+            Screen.Viewer, Screen.RecordingLibrary, Screen.RecordingPlayback -> ""
         }
         val showBack = state.screen == Screen.Collector ||
             state.screen == Screen.ClientList
@@ -175,7 +214,7 @@ fun HomeCameraApp(
                     previewDisplaySize = collectorPreviewSize,
                 )
                 Screen.ClientList -> ClientListScreen(state.client, onAction)
-                Screen.Viewer -> Unit
+                Screen.Viewer, Screen.RecordingLibrary, Screen.RecordingPlayback -> Unit
             }
         }
     }
@@ -675,6 +714,22 @@ private fun ViewerScreen(
             Text(text = "返回", color = Color.White, fontSize = 13.sp)
         }
 
+        // 历史录像入口（胶囊浮层）
+        Row(
+            modifier = Modifier
+                .align(Alignment.TopStart)
+                .padding(top = 52.dp, start = 96.dp)
+                .height(36.dp)
+                .clip(RoundedCornerShape(18.dp))
+                .border(1.dp, Color.White.copy(alpha = 0.25f), RoundedCornerShape(18.dp))
+                .background(Color.Black.copy(alpha = 0.35f))
+                .clickable { onAction(HomeCameraAction.OpenRecordingLibrary) }
+                .padding(horizontal = 14.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Text(text = "历史录像", color = Color.White, fontSize = 13.sp)
+        }
+
         // 右上角设备标签
         state.selectedDevice?.let { device ->
             Column(
@@ -700,6 +755,350 @@ private fun ViewerScreen(
         // 底部状态条
         ViewerStatusBar(status = state.status, errorMessage = state.errorMessage)
     }
+}
+
+@Composable
+private fun RecordingLibraryScreen(
+    state: RecordingLibraryState,
+    modifier: Modifier = Modifier,
+    onAction: (HomeCameraAction) -> Unit,
+) {
+    Column(modifier = modifier) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(56.dp)
+                .background(MaterialTheme.colorScheme.surface),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            IconButton(
+                onClick = { onAction(HomeCameraAction.BackToViewer) },
+                modifier = Modifier.size(44.dp),
+            ) {
+                Icon(
+                    painter = painterResource(id = R.drawable.ic_back),
+                    contentDescription = "返回",
+                    tint = MaterialTheme.colorScheme.onSurface,
+                    modifier = Modifier.size(22.dp),
+                )
+            }
+            Text(
+                text = "历史录像",
+                modifier = Modifier.weight(1f),
+                fontSize = 19.sp,
+                fontWeight = FontWeight.Medium,
+                color = MaterialTheme.colorScheme.onSurface,
+                textAlign = androidx.compose.ui.text.style.TextAlign.Center,
+            )
+            ScanRefreshButton(onClick = { onAction(HomeCameraAction.RefreshRecordingLibrary) })
+            Spacer(Modifier.width(12.dp))
+        }
+        Column(
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(horizontal = 16.dp)
+                .padding(top = 4.dp, bottom = 16.dp),
+        ) {
+            // 日期选择器
+            if (state.dates.isNotEmpty()) {
+                LazyRow(
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    contentPadding = androidx.compose.foundation.layout.PaddingValues(vertical = 4.dp),
+                ) {
+                    items(state.dates, key = { it }) { date ->
+                        val selected = date == state.selectedDate
+                        Box(
+                            modifier = Modifier
+                                .clip(RoundedCornerShape(16.dp))
+                                .background(
+                                    if (selected) MaterialTheme.colorScheme.primary
+                                    else MaterialTheme.colorScheme.surface,
+                                )
+                                .border(
+                                    1.dp,
+                                    if (selected) Color.Transparent else MaterialTheme.colorScheme.outline,
+                                    RoundedCornerShape(16.dp),
+                                )
+                                .clickable { onAction(HomeCameraAction.SelectRecordingDate(date)) }
+                                .padding(horizontal = 14.dp, vertical = 8.dp),
+                        ) {
+                            Text(
+                                text = date,
+                                color = if (selected) Color.White else MaterialTheme.colorScheme.onSurface,
+                                fontSize = 13.sp,
+                                fontWeight = FontWeight.Medium,
+                            )
+                        }
+                    }
+                }
+                Spacer(Modifier.height(12.dp))
+            }
+
+            when {
+                state.status == RecordingLibraryStatus.Loading && state.files.isEmpty() -> {
+                    Box(
+                        modifier = Modifier.fillMaxSize(),
+                        contentAlignment = Alignment.Center,
+                    ) {
+                        Text(
+                            text = "加载中...",
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                }
+                state.status == RecordingLibraryStatus.Error && state.files.isEmpty() -> {
+                    Box(
+                        modifier = Modifier.fillMaxSize(),
+                        contentAlignment = Alignment.Center,
+                    ) {
+                        Text(
+                            text = state.errorMessage ?: "加载失败",
+                            color = MaterialTheme.colorScheme.error,
+                        )
+                    }
+                }
+                state.files.isEmpty() -> {
+                    Box(
+                        modifier = Modifier.fillMaxSize(),
+                        contentAlignment = Alignment.Center,
+                    ) {
+                        Text(
+                            text = "当日无录像",
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                }
+                else -> {
+                    LazyColumn(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                        items(state.files, key = { it.fileId }) { entry ->
+                            RecordingFileItem(
+                                entry = entry,
+                                isDownloading = state.downloadingFileId == entry.fileId,
+                                downloadProgress = if (state.downloadingFileId == entry.fileId) state.downloadProgress else 0f,
+                                onPlay = { onAction(HomeCameraAction.OpenRecordingPlayback(entry.fileId)) },
+                                onDownload = { onAction(HomeCameraAction.DownloadRecording(entry.fileId)) },
+                            )
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun RecordingFileItem(
+    entry: RecordingEntry,
+    isDownloading: Boolean,
+    downloadProgress: Float,
+    onPlay: () -> Unit,
+    onDownload: () -> Unit,
+) {
+    val isRecording = entry.recording
+    Surface(
+        modifier = Modifier.fillMaxWidth(),
+        shape = RoundedCornerShape(12.dp),
+        color = if (isRecording) MaterialTheme.colorScheme.surfaceVariant else MaterialTheme.colorScheme.surface,
+        shadowElevation = 1.dp,
+    ) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(14.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Column(modifier = Modifier.weight(1f)) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text(
+                        text = formatRecordingTime(entry.startMillis),
+                        color = MaterialTheme.colorScheme.onSurface,
+                        fontSize = 15.sp,
+                        fontWeight = FontWeight.Medium,
+                    )
+                    if (isRecording) {
+                        Spacer(Modifier.width(8.dp))
+                        Box(
+                            modifier = Modifier
+                                .clip(RoundedCornerShape(4.dp))
+                                .background(MaterialTheme.colorScheme.error.copy(alpha = 0.15f))
+                                .padding(horizontal = 6.dp, vertical = 2.dp),
+                        ) {
+                            Text(
+                                text = "录制中",
+                                color = MaterialTheme.colorScheme.error,
+                                fontSize = 11.sp,
+                                fontWeight = FontWeight.Medium,
+                            )
+                        }
+                    }
+                }
+                Text(
+                    text = if (isRecording) "录制中，结束后可查看" else "大小 ${formatFileSize(entry.sizeBytes)}",
+                    modifier = Modifier.padding(top = 3.dp),
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    fontSize = 12.sp,
+                )
+                if (isDownloading) {
+                    Spacer(Modifier.height(8.dp))
+                    LinearProgressIndicator(
+                        progress = { downloadProgress },
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(4.dp)
+                            .clip(RoundedCornerShape(2.dp)),
+                    )
+                }
+            }
+            Spacer(Modifier.width(10.dp))
+            PillButton(text = "播放", primary = true, enabled = !isRecording, onClick = onPlay)
+            Spacer(Modifier.width(8.dp))
+            PillButton(
+                text = if (isDownloading) "${(downloadProgress * 100).roundToInt()}%" else "下载",
+                primary = false,
+                enabled = !isDownloading && !isRecording,
+                onClick = onDownload,
+            )
+        }
+    }
+}
+
+@Composable
+private fun PillButton(
+    text: String,
+    primary: Boolean,
+    enabled: Boolean = true,
+    onClick: () -> Unit,
+) {
+    val bg = if (primary) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.surface
+    val content = if (primary) Color.White else MaterialTheme.colorScheme.primary
+    val alpha = if (enabled) 1f else 0.4f
+    Row(
+        modifier = Modifier
+            .height(34.dp)
+            .clip(RoundedCornerShape(17.dp))
+            .background(bg.copy(alpha = alpha))
+            .then(
+                if (primary) Modifier
+                else Modifier.border(1.5.dp, content.copy(alpha = alpha), RoundedCornerShape(17.dp)),
+            )
+            .clickable(enabled = enabled, onClick = onClick)
+            .padding(horizontal = 14.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Text(
+            text = text,
+            color = content.copy(alpha = alpha),
+            fontSize = 13.sp,
+            fontWeight = FontWeight.Medium,
+        )
+    }
+}
+
+@Composable
+private fun RecordingPlaybackScreen(
+    state: RecordingPlaybackState,
+    modifier: Modifier = Modifier,
+    onAction: (HomeCameraAction) -> Unit,
+) {
+    Box(modifier = modifier.background(Color.Black)) {
+        BackHandler { onAction(HomeCameraAction.BackToRecordingLibrary) }
+
+        when (state.status) {
+            RecordingPlaybackStatus.Loading -> {
+                Box(
+                    modifier = Modifier.fillMaxSize(),
+                    contentAlignment = Alignment.Center,
+                ) {
+                    Text(text = "加载录像中...", color = Color.White, fontSize = 14.sp)
+                }
+            }
+            RecordingPlaybackStatus.Error -> {
+                Box(
+                    modifier = Modifier.fillMaxSize(),
+                    contentAlignment = Alignment.Center,
+                ) {
+                    Text(
+                        text = state.errorMessage ?: "加载失败",
+                        color = Color.White.copy(alpha = 0.8f),
+                        fontSize = 14.sp,
+                    )
+                }
+            }
+            RecordingPlaybackStatus.Playing -> {
+                val cachedFile = state.cachedFile
+                if (cachedFile != null) {
+                    AndroidView(
+                        modifier = Modifier.fillMaxSize(),
+                        factory = { context ->
+                            VideoView(context).apply {
+                                setVideoURI(Uri.fromFile(cachedFile))
+                                setOnPreparedListener { it.isLooping = false }
+                                start()
+                            }
+                        },
+                    )
+                }
+            }
+        }
+
+        // 返回按钮
+        Row(
+            modifier = Modifier
+                .align(Alignment.TopStart)
+                .padding(top = 52.dp, start = 16.dp)
+                .height(36.dp)
+                .clip(RoundedCornerShape(18.dp))
+                .border(1.dp, Color.White.copy(alpha = 0.25f), RoundedCornerShape(18.dp))
+                .background(Color.Black.copy(alpha = 0.35f))
+                .clickable { onAction(HomeCameraAction.BackToRecordingLibrary) }
+                .padding(start = 10.dp, end = 14.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Icon(
+                painter = painterResource(id = R.drawable.ic_back),
+                contentDescription = "返回",
+                tint = Color.White,
+                modifier = Modifier.size(18.dp),
+            )
+            Spacer(Modifier.width(5.dp))
+            Text(text = "返回", color = Color.White, fontSize = 13.sp)
+        }
+
+        // 底部保存到相册按钮
+        if (state.status == RecordingPlaybackStatus.Playing) {
+            Row(
+                modifier = Modifier
+                    .align(Alignment.BottomCenter)
+                    .padding(bottom = 32.dp)
+                    .height(42.dp)
+                    .clip(RoundedCornerShape(21.dp))
+                    .background(MaterialTheme.colorScheme.primary)
+                    .clickable(enabled = !state.savingToGallery && !state.savedToGallery) {
+                        onAction(HomeCameraAction.SavePlaybackToGallery)
+                    }
+                    .padding(horizontal = 20.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                val label = when {
+                    state.savedToGallery -> "已保存到相册"
+                    state.savingToGallery -> "保存中..."
+                    else -> "保存到相册"
+                }
+                Text(text = label, color = Color.White, fontSize = 14.sp, fontWeight = FontWeight.Medium)
+            }
+        }
+    }
+}
+
+private fun formatRecordingTime(startMillis: Long): String {
+    if (startMillis <= 0L) return "录像"
+    return SimpleDateFormat("HH:mm:ss", Locale.getDefault()).format(Date(startMillis))
+}
+
+private fun formatFileSize(bytes: Long): String {
+    if (bytes < 1024) return "${bytes}B"
+    if (bytes < 1024 * 1024) return "${bytes / 1024}KB"
+    return "%.1fMB".format(bytes / (1024.0 * 1024.0))
 }
 
 @Composable

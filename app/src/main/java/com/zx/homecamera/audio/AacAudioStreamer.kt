@@ -116,6 +116,8 @@ class AacAudioStreamer(
 
         val readBuffer = ByteArray(readBufferSize)
         val outputInfo = MediaCodec.BufferInfo()
+        // PTS 基于实际采样帧数计算（微秒），从 0 单调递增，精度不受系统调度抖动影响。
+        // Mp4SegmentRecorder 为音频轨道单独取首帧 PTS 作基准，无需与视频时钟源对齐。
         var submittedFrames = 0L
         try {
             while (running.get()) {

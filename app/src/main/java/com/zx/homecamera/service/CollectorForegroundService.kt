@@ -21,12 +21,15 @@ import com.zx.homecamera.R
 import com.zx.homecamera.audio.AacAudioConfig
 import com.zx.homecamera.core.protocol.ControlMessage
 import com.zx.homecamera.core.protocol.ControlProtocol
+import com.zx.homecamera.core.protocol.RecordingEntry
+import com.zx.homecamera.core.storage.RecordingLibrary
 import com.zx.homecamera.core.storage.RecordingStorageCleaner
 import com.zx.homecamera.network.logNet
 import com.zx.homecamera.network.logNetError
 import com.zx.homecamera.video.CameraH264Streamer
 import com.zx.homecamera.video.CollectorCameraRuntime
 import java.io.BufferedReader
+import java.io.BufferedWriter
 import java.io.File
 import java.io.InputStreamReader
 import java.net.NetworkInterface
@@ -45,6 +48,7 @@ class CollectorForegroundService : Service() {
     private var maintenanceExecutor: ExecutorService? = null
     private var serverSocket: ServerSocket? = null
     private var cameraStreamer: CameraH264Streamer? = null
+    private var transferServer: RecordingTransferServer? = null
     private var wifiLock: WifiManager.WifiLock? = null
     private var cpuWakeLock: PowerManager.WakeLock? = null
     private val recordingRoot: File
@@ -113,7 +117,9 @@ class CollectorForegroundService : Service() {
         serverExecutor = Executors.newSingleThreadExecutor().also { executor ->
             executor.executeCatching(::runControlServer)
         }
-        clientExecutor = Executors.newFixedThreadPool(CLIENT_HANDLER_THREADS)
+        val clientPool = Executors.newFixedThreadPool(CLIENT_HANDLER_THREADS)
+        clientExecutor = clientPool
+        transferServer = RecordingTransferServer(recordingRoot, clientPool)
         maintenanceExecutor = Executors.newSingleThreadExecutor().also { executor ->
             executor.executeCatching(::cleanRecordingsOnce)
         }
@@ -153,6 +159,7 @@ class CollectorForegroundService : Service() {
         cameraStreamer?.runCatching { stop() }
         cameraStreamer?.runCatching { CollectorCameraRuntime.detachStreamer(this) }
         cameraStreamer = null
+        transferServer = null
         serverExecutor?.runCatching { shutdownNow() }
         clientExecutor?.runCatching { shutdownNow() }
         maintenanceExecutor?.runCatching { shutdownNow() }
@@ -192,69 +199,122 @@ class CollectorForegroundService : Service() {
             val writer = client.getOutputStream().bufferedWriter(Charsets.UTF_8)
             val firstLine = reader.readLine()
             val message = firstLine?.let(ControlProtocol::decode)
-            if (message !is ControlMessage.ViewStart) {
-                logNet("collector tcp probe remote=${client.inetAddress?.hostAddress}:${client.port} firstLine=${firstLine?.take(80)}")
-                return
-            }
-            logNet("collector received ViewStart remote=${client.inetAddress?.hostAddress}:${client.port} udpPort=${message.udpPort}")
-
-            val streamConfig = cameraStreamer?.streamConfig()
-            val audioConfig = cameraStreamer?.audioConfig()
-            writer.write(
-                ControlProtocol.encode(
-                    ControlMessage.Hello(
-                        deviceId = deviceId,
-                        deviceName = deviceName,
-                        udpPort = STREAM_PORT,
-                        streamWidth = streamConfig?.bufferSize?.width ?: DEFAULT_STREAM_WIDTH,
-                        streamHeight = streamConfig?.bufferSize?.height ?: DEFAULT_STREAM_HEIGHT,
-                        displayWidth = streamConfig?.displaySize?.width ?: DEFAULT_DISPLAY_WIDTH,
-                        displayHeight = streamConfig?.displaySize?.height ?: DEFAULT_DISPLAY_HEIGHT,
-                        streamFps = streamConfig?.fps ?: DEFAULT_STREAM_FPS,
-                        audioEnabled = audioConfig?.enabled ?: AacAudioConfig.DEFAULT_ENABLED,
-                        audioCodec = audioConfig?.codec ?: AacAudioConfig.CODEC,
-                        audioSampleRate = audioConfig?.sampleRate ?: AacAudioConfig.SAMPLE_RATE,
-                        audioChannelCount = audioConfig?.channelCount ?: AacAudioConfig.CHANNEL_COUNT,
-                        audioBitrate = audioConfig?.bitrate ?: AacAudioConfig.BITRATE,
-                    ),
-                ),
-            )
-            writer.newLine()
-            writer.flush()
-            logNet("collector sent Hello remote=${client.inetAddress?.hostAddress}:${client.port} streamPort=$STREAM_PORT")
-            var clientAdded = false
-            try {
-                cameraStreamer?.addClient(client.inetAddress, message.udpPort)
-                clientAdded = true
-                sendStatusBroadcast(STATUS_RUNNING, EXTRA_CLIENT_COUNT, cameraStreamer?.clientCount()?.toString() ?: "0")
-                client.soTimeout = CONTROL_READ_TIMEOUT_MILLIS
-
-                while (lifecycle.isRunning) {
-                    val controlMessage = try {
-                        reader.readLine()?.let(ControlProtocol::decode) ?: return
-                    } catch (_: SocketTimeoutException) {
-                        logNet("collector tcp client timeout remote=${client.inetAddress?.hostAddress}:${client.port}")
-                        return
-                    }
-                    when (controlMessage) {
-                        is ControlMessage.RequestKeyFrame -> cameraStreamer?.requestKeyFrame()
-                        is ControlMessage.Ping -> {
-                            writer.write(ControlProtocol.encode(ControlMessage.Pong(controlMessage.timestampMillis)))
-                            writer.newLine()
-                            writer.flush()
-                        }
-                        is ControlMessage.Bye -> return
-                        else -> Unit
-                    }
-                }
-            } finally {
-                if (clientAdded) {
-                    cameraStreamer?.removeClient(client.inetAddress, message.udpPort)
-                    sendStatusBroadcast(STATUS_RUNNING, EXTRA_CLIENT_COUNT, cameraStreamer?.clientCount()?.toString() ?: "0")
-                }
+            when (message) {
+                is ControlMessage.ViewStart -> handleViewStart(client, reader, writer, message, deviceId, deviceName)
+                is ControlMessage.ListRecordings -> handleListRecordings(writer, message)
+                is ControlMessage.OpenRecording -> handleOpenRecording(writer, message)
+                else -> logNet("collector tcp probe remote=${client.inetAddress?.hostAddress}:${client.port} firstLine=${firstLine?.take(80)}")
             }
         }
     }
+
+    private fun handleViewStart(
+        client: Socket,
+        reader: BufferedReader,
+        writer: BufferedWriter,
+        message: ControlMessage.ViewStart,
+        deviceId: String,
+        deviceName: String,
+    ) {
+        logNet("collector received ViewStart remote=${client.inetAddress?.hostAddress}:${client.port} udpPort=${message.udpPort}")
+
+        val streamConfig = cameraStreamer?.streamConfig()
+        val audioConfig = cameraStreamer?.audioConfig()
+        writer.write(
+            ControlProtocol.encode(
+                ControlMessage.Hello(
+                    deviceId = deviceId,
+                    deviceName = deviceName,
+                    udpPort = STREAM_PORT,
+                    streamWidth = streamConfig?.bufferSize?.width ?: DEFAULT_STREAM_WIDTH,
+                    streamHeight = streamConfig?.bufferSize?.height ?: DEFAULT_STREAM_HEIGHT,
+                    displayWidth = streamConfig?.displaySize?.width ?: DEFAULT_DISPLAY_WIDTH,
+                    displayHeight = streamConfig?.displaySize?.height ?: DEFAULT_DISPLAY_HEIGHT,
+                    streamFps = streamConfig?.fps ?: DEFAULT_STREAM_FPS,
+                    audioEnabled = audioConfig?.enabled ?: AacAudioConfig.DEFAULT_ENABLED,
+                    audioCodec = audioConfig?.codec ?: AacAudioConfig.CODEC,
+                    audioSampleRate = audioConfig?.sampleRate ?: AacAudioConfig.SAMPLE_RATE,
+                    audioChannelCount = audioConfig?.channelCount ?: AacAudioConfig.CHANNEL_COUNT,
+                    audioBitrate = audioConfig?.bitrate ?: AacAudioConfig.BITRATE,
+                ),
+            ),
+        )
+        writer.newLine()
+        writer.flush()
+        logNet("collector sent Hello remote=${client.inetAddress?.hostAddress}:${client.port} streamPort=$STREAM_PORT")
+        var clientAdded = false
+        try {
+            cameraStreamer?.addClient(client.inetAddress, message.udpPort)
+            clientAdded = true
+            sendStatusBroadcast(STATUS_RUNNING, EXTRA_CLIENT_COUNT, cameraStreamer?.clientCount()?.toString() ?: "0")
+            client.soTimeout = CONTROL_READ_TIMEOUT_MILLIS
+
+            while (lifecycle.isRunning) {
+                val controlMessage = try {
+                    reader.readLine()?.let(ControlProtocol::decode) ?: return
+                } catch (_: SocketTimeoutException) {
+                    logNet("collector tcp client timeout remote=${client.inetAddress?.hostAddress}:${client.port}")
+                    return
+                }
+                when (controlMessage) {
+                    is ControlMessage.RequestKeyFrame -> cameraStreamer?.requestKeyFrame()
+                    is ControlMessage.Ping -> {
+                        writer.write(ControlProtocol.encode(ControlMessage.Pong(controlMessage.timestampMillis)))
+                        writer.newLine()
+                        writer.flush()
+                    }
+                    is ControlMessage.Bye -> return
+                    else -> Unit
+                }
+            }
+        } finally {
+            if (clientAdded) {
+                cameraStreamer?.removeClient(client.inetAddress, message.udpPort)
+                sendStatusBroadcast(STATUS_RUNNING, EXTRA_CLIENT_COUNT, cameraStreamer?.clientCount()?.toString() ?: "0")
+            }
+        }
+    }
+
+    private fun handleListRecordings(writer: BufferedWriter, message: ControlMessage.ListRecordings) {
+        val library = RecordingLibrary(recordingRoot)
+        val dates = library.listDates()
+        val recordingFileIds = cameraStreamer?.currentRecordingFileId()?.let { setOf(it) } ?: emptySet()
+        val files = message.date?.let { date -> library.listFiles(date, recordingFileIds) } ?: emptyList()
+        writer.write(
+            ControlProtocol.encode(
+                ControlMessage.RecordingList(dates = dates, files = files.map { it.toEntry() }),
+            ),
+        )
+        writer.newLine()
+        writer.flush()
+        logNet("collector sent RecordingList date=${message.date} dates=${dates.size} files=${files.size} recording=${recordingFileIds.size}")
+    }
+
+    private fun handleOpenRecording(writer: BufferedWriter, message: ControlMessage.OpenRecording) {
+        val server = transferServer ?: return
+        val session = server.prepareTransfer(message.fileId)
+        if (session == null) {
+            logNet("collector OpenRecording rejected fileId=${message.fileId}")
+            return
+        }
+        writer.write(
+            ControlProtocol.encode(
+                ControlMessage.RecordingReady(
+                    fileId = message.fileId,
+                    sizeBytes = session.file.length(),
+                    transferPort = session.transferPort,
+                ),
+            ),
+        )
+        writer.newLine()
+        writer.flush()
+        logNet("collector sent RecordingReady fileId=${message.fileId} port=${session.transferPort} size=${session.file.length()}")
+        // 写完 RecordingReady 后当前 socket 即可关闭，文件字节流走独立 TCP 连接。
+        server.acceptAndSend(session)
+    }
+
+    private fun com.zx.homecamera.core.storage.RecordingFileEntry.toEntry(): RecordingEntry =
+        RecordingEntry(fileId = fileId, sizeBytes = sizeBytes, startMillis = startMillis, recording = recording)
 
     private fun ExecutorService.executeCatching(block: () -> Unit) {
         execute {

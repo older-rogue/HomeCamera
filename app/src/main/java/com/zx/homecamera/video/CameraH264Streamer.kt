@@ -212,6 +212,8 @@ class CameraH264Streamer(
 
     fun audioConfig(): AacAudioConfig = activeAudioConfig
 
+    fun currentRecordingFileId(): String? = recorder?.currentRecordingFileId()
+
     private fun startEncoder() {
         val selection = streamSelection
         val format = MediaFormat.createVideoFormat(
@@ -461,13 +463,16 @@ class CameraH264Streamer(
             streamer.start(
                 onEvent = { event ->
                     when (event) {
-                        is EncodedAudioEvent.FormatChanged -> Unit
+                        is EncodedAudioEvent.FormatChanged -> {
+                            recorder?.onAudioOutputFormatChanged(event.format)
+                        }
                         is EncodedAudioEvent.Sample -> {
                             if (event.flags and MediaUdpPacket.FLAG_CODEC_CONFIG != 0) {
                                 latestAudioCodecConfig = event.data
                                 activeAudioConfig = streamer.config.copy(enabled = true)
                             }
                             sendAudioFrame(event.data, event.flags, event.timestampMicros)
+                            recorder?.writeAudioSample(event.data, event.flags, event.timestampMicros)
                         }
                     }
                 },
