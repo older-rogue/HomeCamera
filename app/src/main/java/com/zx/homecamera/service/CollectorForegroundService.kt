@@ -24,6 +24,7 @@ import com.zx.homecamera.core.protocol.ControlProtocol
 import com.zx.homecamera.core.protocol.RecordingEntry
 import com.zx.homecamera.core.storage.RecordingLibrary
 import com.zx.homecamera.core.storage.RecordingStorageCleaner
+import com.zx.homecamera.network.CollectorDiscoveryBroadcaster
 import com.zx.homecamera.network.logNet
 import com.zx.homecamera.network.logNetError
 import com.zx.homecamera.video.CameraH264Streamer
@@ -47,6 +48,8 @@ class CollectorForegroundService : Service() {
     private var clientExecutor: ExecutorService? = null
     private var maintenanceExecutor: ExecutorService? = null
     private var serverSocket: ServerSocket? = null
+    private var discoveryBroadcaster: CollectorDiscoveryBroadcaster? = null
+    private var discoveryExecutor: ExecutorService? = null
     private var cameraStreamer: CameraH264Streamer? = null
     private var transferServer: RecordingTransferServer? = null
     private var wifiLock: WifiManager.WifiLock? = null
@@ -123,6 +126,21 @@ class CollectorForegroundService : Service() {
         maintenanceExecutor = Executors.newSingleThreadExecutor().also { executor ->
             executor.executeCatching(::cleanRecordingsOnce)
         }
+        startDiscoveryBroadcast()
+    }
+
+    private fun startDiscoveryBroadcast() {
+        val deviceId = Settings.Secure.getString(contentResolver, Settings.Secure.ANDROID_ID) ?: "collector"
+        val deviceName = Build.MODEL ?: "Android 采集端"
+        val broadcaster = CollectorDiscoveryBroadcaster(
+            deviceId = deviceId,
+            deviceName = deviceName,
+            controlPort = CONTROL_PORT,
+        )
+        discoveryBroadcaster = broadcaster
+        discoveryExecutor = Executors.newSingleThreadExecutor().also { executor ->
+            executor.executeCatching { broadcaster.run() }
+        }
     }
 
     private fun stopCollector(startId: Int) {
@@ -156,6 +174,8 @@ class CollectorForegroundService : Service() {
     private fun releaseCollectorResources() {
         serverSocket?.runCatching { close() }
         serverSocket = null
+        discoveryBroadcaster?.runCatching { stop() }
+        discoveryBroadcaster = null
         cameraStreamer?.runCatching { stop() }
         cameraStreamer?.runCatching { CollectorCameraRuntime.detachStreamer(this) }
         cameraStreamer = null
@@ -163,11 +183,13 @@ class CollectorForegroundService : Service() {
         serverExecutor?.runCatching { shutdownNow() }
         clientExecutor?.runCatching { shutdownNow() }
         maintenanceExecutor?.runCatching { shutdownNow() }
+        discoveryExecutor?.runCatching { shutdownNow() }
         releaseWifiLock()
         releaseCpuWakeLock()
         serverExecutor = null
         clientExecutor = null
         maintenanceExecutor = null
+        discoveryExecutor = null
     }
 
     private fun runControlServer() {

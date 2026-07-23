@@ -61,6 +61,16 @@ sealed interface ControlMessage {
         val sizeBytes: Long,
         val transferPort: Int,
     ) : ControlMessage
+
+    /**
+     * 采集端通过 UDP 广播周期性发送的发现通告，客户端据此秒级发现采集端，
+     * 无需逐个探测子网主机。controlPort 为采集端的 TCP 控制端口。
+     */
+    data class Discovery(
+        val deviceId: String,
+        val deviceName: String,
+        val controlPort: Int,
+    ) : ControlMessage
 }
 
 data class RecordingEntry(
@@ -142,6 +152,13 @@ object ControlProtocol {
                 "fileId" to message.fileId,
                 "sizeBytes" to message.sizeBytes.toString(),
                 "transferPort" to message.transferPort.toString(),
+            )
+
+            is ControlMessage.Discovery -> listOf(
+                "type" to "DISCOVERY",
+                "deviceId" to message.deviceId,
+                "deviceName" to message.deviceName,
+                "controlPort" to message.controlPort.toString(),
             )
         }
         return listOf(PREFIX, "version=$VERSION")
@@ -236,6 +253,12 @@ object ControlProtocol {
                 fileId = fields["fileId"] ?: return null,
                 sizeBytes = fields["sizeBytes"]?.toLongOrNull() ?: return null,
                 transferPort = fields["transferPort"]?.toIntOrNull() ?: return null,
+            )
+
+            "DISCOVERY" -> ControlMessage.Discovery(
+                deviceId = fields["deviceId"] ?: return null,
+                deviceName = fields["deviceName"] ?: return null,
+                controlPort = fields["controlPort"]?.toIntOrNull() ?: return null,
             )
 
             else -> null

@@ -122,8 +122,8 @@ class TcpSubnetScanner(
     }
 
     companion object {
-        const val DEFAULT_TIMEOUT_MILLIS = 500
-        const val DEFAULT_PARALLELISM = 32
+        const val DEFAULT_TIMEOUT_MILLIS = 300
+        const val DEFAULT_PARALLELISM = 64
     }
 }
 

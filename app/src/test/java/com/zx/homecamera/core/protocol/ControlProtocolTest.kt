@@ -225,4 +225,46 @@ class ControlProtocolTest {
         val decoded = ControlProtocol.decode(encoded)
         assertEquals(message, decoded)
     }
+
+    @Test
+    fun discoveryMessageRoundTripsWithCollectorInfo() {
+        val message = ControlMessage.Discovery(
+            deviceId = "collector-1",
+            deviceName = "客厅旧手机",
+            controlPort = 62001,
+        )
+
+        val encoded = ControlProtocol.encode(message)
+        val decoded = ControlProtocol.decode(encoded)
+
+        assertEquals(message, decoded)
+    }
+
+    @Test
+    fun discoveryDecodesMessageWithUrlEncodedDeviceName() {
+        // 采集端名称可能含特殊字符（如空格、中文），需 URL 编码后安全往返。
+        val message = ControlMessage.Discovery(
+            deviceId = "collector-1",
+            deviceName = "客厅 旧手机",
+            controlPort = 62001,
+        )
+
+        val encoded = ControlProtocol.encode(message)
+        val decoded = ControlProtocol.decode(encoded)
+
+        assertEquals(message, decoded)
+    }
+
+    @Test
+    fun discoveryReturnsNullWhenControlPortMissing() {
+        val incomplete = listOf(
+            "HOME_CAMERA_CONTROL",
+            "version=1",
+            "type=DISCOVERY",
+            "deviceId=collector-1",
+            "deviceName=客厅",
+        ).joinToString("|")
+
+        assertNull(ControlProtocol.decode(incomplete))
+    }
 }

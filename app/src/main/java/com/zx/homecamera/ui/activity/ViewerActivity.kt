@@ -19,6 +19,7 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Icon
@@ -37,9 +38,6 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
-import androidx.core.view.WindowCompat
-import androidx.core.view.WindowInsetsCompat
-import androidx.core.view.WindowInsetsControllerCompat
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.zx.homecamera.R
 import com.zx.homecamera.ViewerViewModel
@@ -75,11 +73,6 @@ class ViewerActivity : ComponentActivity() {
                 }
             }
 
-            // 沉浸式系统栏
-            val controller = WindowCompat.getInsetsController(window, window.decorView)
-            controller.systemBarsBehavior = WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
-            controller.hide(WindowInsetsCompat.Type.systemBars())
-
             HomeCameraTheme {
                 ViewerScreen(
                     state = state,
@@ -95,8 +88,6 @@ class ViewerActivity : ComponentActivity() {
 
     override fun onDestroy() {
         super.onDestroy()
-        val controller = WindowCompat.getInsetsController(window, window.decorView)
-        controller.show(WindowInsetsCompat.Type.systemBars())
     }
 
     private fun openRecordingLibrary(device: CollectorDevice) {
@@ -140,7 +131,8 @@ private fun ViewerScreen(
         Row(
             modifier = Modifier
                 .align(Alignment.TopStart)
-                .padding(top = 52.dp, start = 16.dp)
+                .statusBarsPadding()
+                .padding(top = 8.dp, start = 16.dp)
                 .height(36.dp)
                 .clip(RoundedCornerShape(18.dp))
                 .border(1.dp, Color.White.copy(alpha = 0.25f), RoundedCornerShape(18.dp))
@@ -163,7 +155,8 @@ private fun ViewerScreen(
         Row(
             modifier = Modifier
                 .align(Alignment.TopStart)
-                .padding(top = 52.dp, start = 96.dp)
+                .statusBarsPadding()
+                .padding(top = 8.dp, start = 96.dp)
                 .height(36.dp)
                 .clip(RoundedCornerShape(18.dp))
                 .border(1.dp, Color.White.copy(alpha = 0.25f), RoundedCornerShape(18.dp))
@@ -180,7 +173,8 @@ private fun ViewerScreen(
             Column(
                 modifier = Modifier
                     .align(Alignment.TopEnd)
-                    .padding(top = 56.dp, end = 16.dp),
+                    .statusBarsPadding()
+                    .padding(top = 12.dp, end = 16.dp),
                 horizontalAlignment = Alignment.End,
             ) {
                 Text(
