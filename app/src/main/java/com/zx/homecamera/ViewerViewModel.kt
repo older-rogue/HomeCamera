@@ -34,10 +34,41 @@ class ViewerViewModel(application: Application) : AndroidViewModel(application) 
     @Volatile
     private var viewerSurface: Surface? = null
     private var viewerStreamKey: String? = null
+    @Volatile
+    private var paused = false
 
     fun setDevice(device: CollectorDevice) {
+        paused = false
         resetViewerConnection()
         _state.value = ViewerState(selectedDevice = device, status = ViewerStatus.Connecting)
+        connectViewerStream(device)
+    }
+
+    /**
+     * Activity onPause 时调用：断开采集端连接、停止接收解码与释放 WifiLock，
+     * 减少 pause 期间无效的网络接收与解码开销。保留已选设备与 surface 引用，
+     * 以便 [resume] 时重新连接。置 Disconnected 反映当前无数据状态。
+     */
+    fun pause() {
+        paused = true
+        resetViewerConnection()
+        if (_state.value.status == ViewerStatus.Playing ||
+            _state.value.status == ViewerStatus.Connecting ||
+            _state.value.status == ViewerStatus.Reconnecting
+        ) {
+            _state.value = _state.value.copy(status = ViewerStatus.Disconnected)
+        }
+    }
+
+    /**
+     * Activity onResume 时调用：若此前 [pause] 过且仍持有已选设备，重新连接采集端。
+     * 连接成功后因 surface 通常仍就绪，会自动恢复接收解码渲染。
+     */
+    fun resume() {
+        if (!paused) return
+        paused = false
+        val device = _state.value.selectedDevice ?: return
+        _state.value = _state.value.copy(status = ViewerStatus.Connecting)
         connectViewerStream(device)
     }
 

@@ -38,7 +38,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
-import androidx.lifecycle.viewmodel.compose.viewModel
+import androidx.lifecycle.ViewModelProvider
 import com.zx.homecamera.R
 import com.zx.homecamera.ViewerViewModel
 import com.zx.homecamera.core.app.CollectorDevice
@@ -53,12 +53,15 @@ import com.zx.homecamera.video.CameraH264Streamer
 import com.zx.homecamera.video.VideoSize
 
 class ViewerActivity : ComponentActivity() {
+    private val viewModel: ViewerViewModel by lazy {
+        ViewModelProvider(this)[ViewerViewModel::class.java]
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
         val device = CollectorDevice.fromIntent(intent)
         setContent {
-            val viewModel: ViewerViewModel = viewModel()
             val state by viewModel.state.collectAsState()
             val viewerConnection by viewModel.viewerConnectionState.collectAsState()
 
@@ -84,6 +87,16 @@ class ViewerActivity : ComponentActivity() {
                 )
             }
         }
+    }
+
+    override fun onResume() {
+        super.onResume()
+        viewModel.resume()
+    }
+
+    override fun onPause() {
+        super.onPause()
+        viewModel.pause()
     }
 
     override fun onDestroy() {
