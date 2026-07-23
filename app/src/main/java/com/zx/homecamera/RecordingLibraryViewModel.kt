@@ -2,6 +2,8 @@ package com.zx.homecamera
 
 import android.app.Application
 import android.net.Uri
+import android.os.Build
+import android.provider.MediaStore
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.zx.homecamera.core.app.CollectorDevice
@@ -56,11 +58,13 @@ class RecordingLibraryViewModel(application: Application) : AndroidViewModel(app
             val result = runCatching { recordingApi.listFiles(device, date) }
             val files = result.getOrDefault(emptyList())
             val error = result.exceptionOrNull()?.message
+            val downloaded = queryDownloadedFileIds(files)
             viewModelScope.launch {
                 _state.value = _state.value.copy(
                     status = if (error != null) RecordingLibraryStatus.Error else RecordingLibraryStatus.Loaded,
                     selectedDate = date,
                     files = files,
+                    downloadedFileIds = downloaded,
                     errorMessage = error,
                 )
             }
@@ -90,13 +94,54 @@ class RecordingLibraryViewModel(application: Application) : AndroidViewModel(app
             }
             val error = result.exceptionOrNull()?.message ?: if (result.getOrNull() == null) "下载失败" else null
             viewModelScope.launch {
+                val downloaded = if (result.getOrNull() != null) {
+                    _state.value.downloadedFileIds + fileId
+                } else {
+                    _state.value.downloadedFileIds
+                }
                 _state.value = _state.value.copy(
                     downloadingFileId = null,
                     downloadProgress = 0f,
+                    downloadedFileIds = downloaded,
                     errorMessage = error,
                 )
             }
         }
+    }
+
+    fun cancelDownload() {
+        recordingApi.cancel()
+        _state.value = _state.value.copy(
+            downloadingFileId = null,
+            downloadProgress = 0f,
+        )
+    }
+
+    /**
+     * 查询系统相册（Movies/HomeCamera）中已存在的录像文件，返回已下载的 fileId 集合。
+     * displayName 规则与 [RecordingApiClient] 一一对应：HomeCamera_<fileId 中 / 替换为 _>。
+     */
+    private fun queryDownloadedFileIds(files: List<RecordingEntry>): Set<String> {
+        if (files.isEmpty()) return emptySet()
+        val context = getApplication<Application>()
+        val collection = MediaStore.Video.Media.getContentUri(MediaStore.VOLUME_EXTERNAL_PRIMARY)
+        val projection = arrayOf(MediaStore.Video.Media.DISPLAY_NAME)
+        val selection = "${MediaStore.Video.Media.RELATIVE_PATH} = ?"
+        val selectionArgs = arrayOf("${android.os.Environment.DIRECTORY_MOVIES}/HomeCamera/")
+        val existing = mutableSetOf<String>()
+        context.contentResolver.query(collection, projection, selection, selectionArgs, null)?.use { cursor ->
+            val nameIndex = cursor.getColumnIndex(MediaStore.Video.Media.DISPLAY_NAME)
+            while (cursor.moveToNext()) {
+                if (nameIndex >= 0) {
+                    existing.add(cursor.getString(nameIndex))
+                }
+            }
+        }
+        if (existing.isEmpty()) return emptySet()
+        return files.mapNotNull { entry ->
+            val displayName = "HomeCamera_${entry.fileId.replace('/', '_')}"
+            if (displayName in existing) entry.fileId else null
+        }.toSet()
     }
 
     override fun onCleared() {

@@ -2,7 +2,6 @@ package com.zx.homecamera.core.app
 
 import android.content.Intent
 import com.zx.homecamera.core.protocol.RecordingEntry
-import java.io.File
 
 enum class AppRole {
     Collector,
@@ -122,13 +121,14 @@ data class RecordingLibraryState(
     val files: List<RecordingEntry> = emptyList(),
     val downloadingFileId: String? = null,
     val downloadProgress: Float = 0f,
+    val downloadedFileIds: Set<String> = emptySet(),
     val errorMessage: String? = null,
 )
 
 data class RecordingPlaybackState(
     val fileId: String = "",
     val status: RecordingPlaybackStatus = RecordingPlaybackStatus.Loading,
-    val cachedFile: File? = null,
+    val playbackUrl: String? = null,
     val errorMessage: String? = null,
     val savedToGallery: Boolean = false,
     val savingToGallery: Boolean = false,

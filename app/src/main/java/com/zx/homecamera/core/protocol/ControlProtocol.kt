@@ -78,6 +78,7 @@ data class RecordingEntry(
     val sizeBytes: Long,
     val startMillis: Long,
     val recording: Boolean = false,
+    val corrupted: Boolean = false,
 )
 
 object ControlProtocol {
@@ -138,7 +139,7 @@ object ControlProtocol {
                 "type" to "RECORDING_LIST",
                 "dates" to message.dates.joinToString(";"),
                 "files" to message.files.joinToString(";") { entry ->
-                    "${entry.fileId},${entry.sizeBytes},${entry.startMillis},${entry.recording}"
+                    "${entry.fileId},${entry.sizeBytes},${entry.startMillis},${entry.recording},${entry.corrupted}"
                 },
             )
 
@@ -241,7 +242,9 @@ object ControlProtocol {
                     val startMillis = parts[2].toLongOrNull() ?: return@mapNotNull null
                     // 第 4 字段 recording 可选，兼容旧采集端只发 3 字段的情况
                     val recording = parts.getOrNull(3)?.toBooleanStrictOrNull() ?: false
-                    RecordingEntry(fileId, sizeBytes, startMillis, recording)
+                    // 第 5 字段 corrupted 可选，兼容旧采集端只发 4 字段的情况
+                    val corrupted = parts.getOrNull(4)?.toBooleanStrictOrNull() ?: false
+                    RecordingEntry(fileId, sizeBytes, startMillis, recording, corrupted)
                 } ?: emptyList(),
             )
 

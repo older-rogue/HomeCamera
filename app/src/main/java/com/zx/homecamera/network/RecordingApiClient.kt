@@ -26,6 +26,21 @@ import java.net.Socket
  */
 class RecordingApiClient {
     /**
+     * 当前下载使用的 socket，供 [cancel] 中断下载。同一时刻只有一个下载在进行。
+     */
+    @Volatile
+    private var activeTransferSocket: Socket? = null
+
+    /**
+     * 中断当前正在进行的下载：关闭传输 socket，使阻塞中的 read 抛异常从而终止下载。
+     * 可从任意线程调用，对未在下载的状态安全。
+     */
+    fun cancel() {
+        activeTransferSocket?.runCatching { close() }
+        activeTransferSocket = null
+    }
+
+    /**
      * 请求录像日期列表。返回所有可用日期（降序）。
      */
     fun listDates(device: CollectorDevice, timeoutMillis: Int = DEFAULT_TIMEOUT_MILLIS): List<String> {
@@ -95,6 +110,7 @@ class RecordingApiClient {
         timeoutMillis: Int = DEFAULT_TIMEOUT_MILLIS,
     ): Uri? {
         val transfer = openTransfer(device, entry.fileId, timeoutMillis) ?: return null
+        activeTransferSocket = transfer.socket
         val displayName = galleryDisplayName(entry)
         val resolver = context.contentResolver
         val collection = MediaStore.Video.Media.getContentUri(MediaStore.VOLUME_EXTERNAL_PRIMARY)
@@ -108,6 +124,7 @@ class RecordingApiClient {
         }
         val uri = resolver.insert(collection, values) ?: run {
             transfer.socket.close()
+            activeTransferSocket = null
             return null
         }
         return runCatching {
@@ -136,7 +153,9 @@ class RecordingApiClient {
             Log.w(TAG, "download to gallery failed fileId=${entry.fileId}", error)
             runCatching { resolver.delete(uri, null, null) }
             runCatching { transfer.socket.close() }
-        }.getOrNull()
+        }.getOrNull().also {
+            activeTransferSocket = null
+        }
     }
 
     private fun request(

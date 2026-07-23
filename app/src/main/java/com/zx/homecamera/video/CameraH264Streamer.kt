@@ -275,6 +275,9 @@ class CameraH264Streamer(
                 "aeRange=${targetFpsRange.formatForLog()} " +
                 "availableAeRanges=$availableFpsRangesLog",
         )
+        // 计算与预览一致的相对旋转，写入录像文件旋转标记，使播放器/相册按采集端朝向显示。
+        val relativeRotation = ((sensorOrientation - displayRotationDegrees) % 360 + 360) % 360
+        recorder?.setOrientationHint(relativeRotation)
     }
 
     private fun CameraFpsRange?.formatForLog(): String =

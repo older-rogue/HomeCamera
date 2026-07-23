@@ -150,8 +150,9 @@ class ControlProtocolTest {
         val message = ControlMessage.RecordingList(
             dates = listOf("2026-07-21", "2026-07-20"),
             files = listOf(
-                RecordingEntry(fileId = "2026-07-21/14-30-00.mp4", sizeBytes = 12_345L, startMillis = 1_700_000_000_000L, recording = false),
-                RecordingEntry(fileId = "2026-07-21/14-40-00.mp4", sizeBytes = 67_890L, startMillis = 1_700_000_600_000L, recording = true),
+                RecordingEntry(fileId = "2026-07-21/14-30-00.mp4", sizeBytes = 12_345L, startMillis = 1_700_000_000_000L, recording = false, corrupted = false),
+                RecordingEntry(fileId = "2026-07-21/14-40-00.mp4", sizeBytes = 67_890L, startMillis = 1_700_000_600_000L, recording = true, corrupted = false),
+                RecordingEntry(fileId = "2026-07-21/14-50-00.mp4", sizeBytes = 3_000L, startMillis = 1_700_001_200_000L, recording = false, corrupted = true),
             ),
         )
 
@@ -180,6 +181,25 @@ class ControlProtocolTest {
         assertEquals(12_345L, entry?.sizeBytes)
         assertEquals(1_700_000_000_000L, entry?.startMillis)
         assertEquals(false, entry?.recording)
+    }
+
+    @Test
+    fun recordingListDecodesLegacyFourFieldEntriesWithoutCorruptedFlag() {
+        // 旧采集端只发 fileId,sizeBytes,startMillis,recording 四字段，corrupted 应默认 false。
+        val legacy = listOf(
+            "HOME_CAMERA_CONTROL",
+            "version=1",
+            "type=RECORDING_LIST",
+            "dates=2026-07-21",
+            "files=2026-07-21/14-30-00.mp4,12345,1700000000000,true",
+        ).joinToString("|")
+
+        val decoded = ControlProtocol.decode(legacy) as? ControlMessage.RecordingList
+
+        val entry = decoded?.files?.singleOrNull()
+        assertEquals("2026-07-21/14-30-00.mp4", entry?.fileId)
+        assertEquals(true, entry?.recording)
+        assertEquals(false, entry?.corrupted)
     }
 
     @Test

@@ -16,6 +16,7 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Icon
@@ -34,10 +35,8 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
+import android.widget.MediaController
 import android.widget.VideoView
-import androidx.core.view.WindowCompat
-import androidx.core.view.WindowInsetsCompat
-import androidx.core.view.WindowInsetsControllerCompat
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.zx.homecamera.R
 import com.zx.homecamera.RecordingPlaybackViewModel
@@ -59,11 +58,6 @@ class RecordingPlaybackActivity : ComponentActivity() {
                 device?.let { viewModel.init(it, fileId) }
             }
 
-            // 沉浸式
-            val controller = WindowCompat.getInsetsController(window, window.decorView)
-            controller.systemBarsBehavior = WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
-            controller.hide(WindowInsetsCompat.Type.systemBars())
-
             HomeCameraTheme {
                 Box(modifier = Modifier.fillMaxSize().background(Color.Black)) {
                     when (state.status) {
@@ -78,14 +72,21 @@ class RecordingPlaybackActivity : ComponentActivity() {
                             }
                         }
                         RecordingPlaybackStatus.Playing -> {
-                            val cachedFile = state.cachedFile
-                            if (cachedFile != null) {
+                            val playbackUrl = state.playbackUrl
+                            if (playbackUrl != null) {
                                 AndroidView(
                                     modifier = Modifier.fillMaxSize(),
                                     factory = { context ->
                                         VideoView(context).apply {
-                                            setVideoURI(Uri.fromFile(cachedFile))
+                                            setVideoURI(Uri.parse(playbackUrl))
                                             setOnPreparedListener { it.isLooping = false }
+                                            setOnErrorListener { _, _, _ ->
+                                                viewModel.onPlaybackError("视频加载失败，可能文件损坏")
+                                                true
+                                            }
+                                            val controller = MediaController(context)
+                                            controller.setMediaPlayer(this)
+                                            setMediaController(controller)
                                             start()
                                         }
                                     },
@@ -98,7 +99,8 @@ class RecordingPlaybackActivity : ComponentActivity() {
                     Row(
                         modifier = Modifier
                             .align(Alignment.TopStart)
-                            .padding(top = 52.dp, start = 16.dp)
+                            .statusBarsPadding()
+                            .padding(top = 8.dp, start = 16.dp)
                             .height(36.dp)
                             .clip(RoundedCornerShape(18.dp))
                             .border(1.dp, Color.White.copy(alpha = 0.25f), RoundedCornerShape(18.dp))
@@ -147,8 +149,6 @@ class RecordingPlaybackActivity : ComponentActivity() {
 
     override fun onDestroy() {
         super.onDestroy()
-        val controller = WindowCompat.getInsetsController(window, window.decorView)
-        controller.show(WindowInsetsCompat.Type.systemBars())
     }
 
     companion object {

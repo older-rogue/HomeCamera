@@ -38,6 +38,20 @@ class Mp4SegmentRecorder(
     private var firstAudioSampleLogged = false
     private var firstVideoSampleLogged = false
 
+    /**
+     * 写入 mp4 容器的旋转标记（0/90/180/270）。由采集端根据 sensorOrientation 与
+     * displayRotation 的相对旋转设置，使播放器/相册按正确朝向显示。默认 0（不旋转）。
+     */
+    @Volatile
+    private var orientationHintDegrees: Int = 0
+
+    /**
+     * 设置录像文件的旋转标记，对后续新开的 segment 生效。
+     */
+    fun setOrientationHint(degrees: Int) {
+        orientationHintDegrees = degrees
+    }
+
     @Synchronized
     fun onOutputFormatChanged(format: MediaFormat) {
         videoOutputFormat = MediaFormat(format)
@@ -144,6 +158,9 @@ class Mp4SegmentRecorder(
                 "file=${file.name}",
         )
         muxer = MediaMuxer(file.absolutePath, MediaMuxer.OutputFormat.MUXER_OUTPUT_MPEG_4).also { newMuxer ->
+            // setOrientationHint 必须在 addTrack/start 之前调用，写入容器旋转标记，
+            // 让播放器/相册按采集端竖屏朝向显示。
+            newMuxer.setOrientationHint(orientationHintDegrees)
             videoTrackIndex = newMuxer.addTrack(videoFormat)
             audioTrackIndex = if (audioFormat != null) newMuxer.addTrack(audioFormat) else -1
             newMuxer.start()

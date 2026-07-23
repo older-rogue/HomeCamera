@@ -4,6 +4,7 @@ import android.content.Intent
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
+import androidx.activity.enableEdgeToEdge
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -13,6 +14,7 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
@@ -33,7 +35,6 @@ import com.zx.homecamera.ui.activity.RoleSelectionActivity
 import com.zx.homecamera.local.LocalData
 import com.zx.homecamera.ui.theme.HomeCameraTheme
 import com.zx.homecamera.ui.theme.Purple40
-import com.zx.homecamera.utils.StatusBarUtil
 
 /**
  * 介绍页 Activity
@@ -44,7 +45,7 @@ class IntroActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        StatusBarUtil.setWhiteStatusBar(this)
+        enableEdgeToEdge()
         setContent {
             HomeCameraTheme {
                 IntroScreen(
@@ -71,7 +72,7 @@ private fun IntroScreen(
         modifier = Modifier.fillMaxSize(),
         color = Color.White,
     ) {
-        Column(modifier = Modifier.fillMaxSize()) {
+        Column(modifier = Modifier.fillMaxSize().statusBarsPadding()) {
             // 顶部标题
             Text(
                 text = "请大家认真阅读",
@@ -79,7 +80,7 @@ private fun IntroScreen(
                 fontWeight = FontWeight.Bold,
                 color = Color.Black,
                 modifier = Modifier
-                    .padding(top = 28.dp, bottom = 6.dp)
+                    .padding(top = 8.dp, bottom = 6.dp)
                     .align(Alignment.CenterHorizontally),
             )
 

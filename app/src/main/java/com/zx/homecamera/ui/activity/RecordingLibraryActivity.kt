@@ -25,11 +25,8 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.material3.Icon
-import androidx.compose.material3.IconButton
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -39,23 +36,22 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.res.painterResource
+import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.viewmodel.compose.viewModel
-import com.zx.homecamera.R
 import com.zx.homecamera.RecordingLibraryViewModel
 import com.zx.homecamera.core.app.CollectorDevice
 import com.zx.homecamera.core.app.RecordingLibraryStatus
 import com.zx.homecamera.core.protocol.RecordingEntry
+import com.zx.homecamera.ui.AppTopBar
 import com.zx.homecamera.ui.PillButton
 import com.zx.homecamera.ui.ScanRefreshButton
 import com.zx.homecamera.ui.theme.HomeCameraTheme
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
-import kotlin.math.roundToInt
 
 class RecordingLibraryActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -72,47 +68,34 @@ class RecordingLibraryActivity : ComponentActivity() {
 
             HomeCameraTheme {
                 Column(modifier = Modifier.fillMaxSize().statusBarsPadding()) {
-                    // 顶栏（返回 + 刷新）
-                    Row(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .height(56.dp)
-                            .background(MaterialTheme.colorScheme.surface),
-                        verticalAlignment = Alignment.CenterVertically,
-                    ) {
-                        IconButton(
-                            onClick = { finish() },
-                            modifier = Modifier.size(44.dp),
-                        ) {
-                            Icon(
-                                painter = painterResource(id = R.drawable.ic_back),
-                                contentDescription = "返回",
-                                tint = MaterialTheme.colorScheme.onSurface,
-                                modifier = Modifier.size(22.dp),
-                            )
-                        }
-                        Text(
-                            text = "历史录像",
-                            modifier = Modifier.weight(1f),
-                            fontSize = 19.sp,
-                            fontWeight = FontWeight.Medium,
-                            color = MaterialTheme.colorScheme.onSurface,
-                            textAlign = androidx.compose.ui.text.style.TextAlign.Center,
-                        )
-                        ScanRefreshButton(onClick = {
-                            val selectedDate = state.selectedDate
-                            if (selectedDate != null) viewModel.loadRecordingFiles(selectedDate)
-                            else viewModel.loadRecordingDates()
-                        })
-                        Spacer(Modifier.width(12.dp))
-                    }
+                    AppTopBar(title = "历史录像", showBack = true, onBack = { finish() })
 
                     Column(
                         modifier = Modifier
                             .fillMaxSize()
                             .padding(horizontal = 16.dp)
                             .padding(top = 4.dp, bottom = 16.dp),
+                        verticalArrangement = Arrangement.spacedBy(10.dp),
                     ) {
+                        // 内容头部：当前选中日期 + 刷新
+                        Row(
+                            modifier = Modifier.fillMaxWidth().padding(top = 4.dp, bottom = 6.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            Text(
+                                text = state.selectedDate ?: "历史录像",
+                                modifier = Modifier.weight(1f),
+                                color = MaterialTheme.colorScheme.onSurface,
+                                fontSize = 15.sp,
+                                fontWeight = FontWeight.Medium,
+                            )
+                            ScanRefreshButton(onClick = {
+                                val selectedDate = state.selectedDate
+                                if (selectedDate != null) viewModel.loadRecordingFiles(selectedDate)
+                                else viewModel.loadRecordingDates()
+                            })
+                        }
+
                         if (state.dates.isNotEmpty()) {
                             LazyRow(
                                 horizontalArrangement = Arrangement.spacedBy(8.dp),
@@ -122,7 +105,7 @@ class RecordingLibraryActivity : ComponentActivity() {
                                     val selected = date == state.selectedDate
                                     Box(
                                         modifier = Modifier
-                                            .clip(RoundedCornerShape(16.dp))
+                                            .clip(RoundedCornerShape(12.dp))
                                             .background(
                                                 if (selected) MaterialTheme.colorScheme.primary
                                                 else MaterialTheme.colorScheme.surface,
@@ -130,7 +113,7 @@ class RecordingLibraryActivity : ComponentActivity() {
                                             .border(
                                                 1.dp,
                                                 if (selected) Color.Transparent else MaterialTheme.colorScheme.outline,
-                                                RoundedCornerShape(16.dp),
+                                                RoundedCornerShape(12.dp),
                                             )
                                             .clickable { viewModel.loadRecordingFiles(date) }
                                             .padding(horizontal = 14.dp, vertical = 8.dp),
@@ -144,7 +127,6 @@ class RecordingLibraryActivity : ComponentActivity() {
                                     }
                                 }
                             }
-                            Spacer(Modifier.height(12.dp))
                         }
 
                         when {
@@ -170,6 +152,7 @@ class RecordingLibraryActivity : ComponentActivity() {
                                             entry = entry,
                                             isDownloading = state.downloadingFileId == entry.fileId,
                                             downloadProgress = if (state.downloadingFileId == entry.fileId) state.downloadProgress else 0f,
+                                            isDownloaded = entry.fileId in state.downloadedFileIds,
                                             onPlay = { openPlayback(device!!, entry) },
                                             onDownload = { viewModel.downloadRecordingToGallery(entry.fileId) },
                                         )
@@ -196,69 +179,93 @@ private fun RecordingFileItem(
     entry: RecordingEntry,
     isDownloading: Boolean,
     downloadProgress: Float,
+    isDownloaded: Boolean,
     onPlay: () -> Unit,
     onDownload: () -> Unit,
 ) {
     val isRecording = entry.recording
-    Surface(
-        modifier = Modifier.fillMaxWidth(),
-        shape = RoundedCornerShape(12.dp),
-        color = if (isRecording) MaterialTheme.colorScheme.surfaceVariant else MaterialTheme.colorScheme.surface,
-        shadowElevation = 1.dp,
+    val isCorrupted = entry.corrupted
+    val containerColor = if (isRecording || isCorrupted) {
+        MaterialTheme.colorScheme.errorContainer
+    } else {
+        MaterialTheme.colorScheme.surfaceContainer
+    }
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(12.dp))
+            .background(containerColor)
+            .padding(14.dp),
+        verticalAlignment = Alignment.CenterVertically,
     ) {
-        Row(
-            modifier = Modifier.fillMaxWidth().padding(14.dp),
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            Column(modifier = Modifier.weight(1f)) {
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Text(
-                        text = formatRecordingTime(entry.startMillis),
-                        color = MaterialTheme.colorScheme.onSurface,
-                        fontSize = 15.sp,
-                        fontWeight = FontWeight.Medium,
-                    )
-                    if (isRecording) {
-                        Spacer(Modifier.width(8.dp))
-                        Box(
-                            modifier = Modifier
-                                .clip(RoundedCornerShape(4.dp))
-                                .background(MaterialTheme.colorScheme.error.copy(alpha = 0.15f))
-                                .padding(horizontal = 6.dp, vertical = 2.dp),
-                        ) {
-                            Text(
-                                text = "录制中",
-                                color = MaterialTheme.colorScheme.error,
-                                fontSize = 11.sp,
-                                fontWeight = FontWeight.Medium,
-                            )
-                        }
+        Column(modifier = Modifier.weight(1f)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text(
+                    text = formatRecordingTime(entry.startMillis),
+                    color = MaterialTheme.colorScheme.onSurface,
+                    fontSize = 15.sp,
+                    fontWeight = FontWeight.Medium,
+                )
+                if (isRecording || isCorrupted) {
+                    Spacer(Modifier.width(8.dp))
+                    Box(
+                        modifier = Modifier
+                            .clip(RoundedCornerShape(4.dp))
+                            .background(MaterialTheme.colorScheme.error.copy(alpha = 0.15f))
+                            .padding(horizontal = 6.dp, vertical = 2.dp),
+                    ) {
+                        Text(
+                            text = if (isRecording) "录制中" else "已损坏",
+                            color = MaterialTheme.colorScheme.error,
+                            fontSize = 11.sp,
+                            fontWeight = FontWeight.Medium,
+                        )
                     }
                 }
-                Text(
-                    text = if (isRecording) "录制中，结束后可查看" else "大小 ${formatFileSize(entry.sizeBytes)}",
-                    modifier = Modifier.padding(top = 3.dp),
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    fontSize = 12.sp,
-                )
-                if (isDownloading) {
-                    Spacer(Modifier.height(8.dp))
-                    LinearProgressIndicator(
-                        progress = { downloadProgress },
-                        modifier = Modifier.fillMaxWidth().height(4.dp).clip(RoundedCornerShape(2.dp)),
+            }
+            Text(
+                text = when {
+                    isRecording -> "录制中，结束后可查看"
+                    isCorrupted -> "文件损坏，无法播放"
+                    else -> "大小 ${formatFileSize(entry.sizeBytes)}"
+                },
+                modifier = Modifier.padding(top = 3.dp),
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                fontSize = 12.sp,
+            )
+            if (isDownloading) {
+                Spacer(Modifier.height(8.dp))
+                // 外层 = 整条轨道：一个实心、贯通左右的圆角"槽"
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(6.dp)
+                        .clip(RoundedCornerShape(3.dp))                                  // 裁出圆角槽，并裁切内部填充的左端
+                        .background(MaterialTheme.colorScheme.onSurface.copy(alpha = 0.12f)) // 轨道色：清晰的中性灰槽
+                ) {
+                    // 内层 = 已下载部分：叠在槽上的实心蓝条，右端是干净竖直边，左端被外层裁成圆角
+                    Box(
+                        modifier = Modifier
+                            .fillMaxWidth(fraction = downloadProgress.coerceIn(0f, 1f))
+                            .height(6.dp)
+                            .background(MaterialTheme.colorScheme.primary)
                     )
                 }
             }
-            Spacer(Modifier.width(10.dp))
-            PillButton(text = "播放", primary = true, enabled = !isRecording, onClick = onPlay)
-            Spacer(Modifier.width(8.dp))
-            PillButton(
-                text = if (isDownloading) "${(downloadProgress * 100).roundToInt()}%" else "下载",
-                primary = false,
-                enabled = !isDownloading && !isRecording,
-                onClick = onDownload,
-            )
         }
+        Spacer(Modifier.width(10.dp))
+        PillButton(text = "播放", primary = true, enabled = !isRecording && !isCorrupted, onClick = onPlay)
+        Spacer(Modifier.width(8.dp))
+        PillButton(
+            text = when {
+                isDownloading -> "下载中..."
+                isDownloaded -> "已下载"
+                else -> "下载"
+            },
+            primary = false,
+            enabled = !isDownloading && !isRecording && !isCorrupted && !isDownloaded,
+            onClick = onDownload,
+        )
     }
 }
 

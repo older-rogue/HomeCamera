@@ -22,6 +22,7 @@ import com.zx.homecamera.audio.AacAudioConfig
 import com.zx.homecamera.core.protocol.ControlMessage
 import com.zx.homecamera.core.protocol.ControlProtocol
 import com.zx.homecamera.core.protocol.RecordingEntry
+import com.zx.homecamera.core.storage.RecordingIntegrityChecker
 import com.zx.homecamera.core.storage.RecordingLibrary
 import com.zx.homecamera.core.storage.RecordingStorageCleaner
 import com.zx.homecamera.network.CollectorDiscoveryBroadcaster
@@ -52,6 +53,7 @@ class CollectorForegroundService : Service() {
     private var discoveryExecutor: ExecutorService? = null
     private var cameraStreamer: CameraH264Streamer? = null
     private var transferServer: RecordingTransferServer? = null
+    private var recordingHttpServer: RecordingHttpServer? = null
     private var wifiLock: WifiManager.WifiLock? = null
     private var cpuWakeLock: PowerManager.WakeLock? = null
     private val recordingRoot: File
@@ -123,6 +125,7 @@ class CollectorForegroundService : Service() {
         val clientPool = Executors.newFixedThreadPool(CLIENT_HANDLER_THREADS)
         clientExecutor = clientPool
         transferServer = RecordingTransferServer(recordingRoot, clientPool)
+        recordingHttpServer = RecordingHttpServer(recordingRoot, HTTP_PORT).also { it.start() }
         maintenanceExecutor = Executors.newSingleThreadExecutor().also { executor ->
             executor.executeCatching(::cleanRecordingsOnce)
         }
@@ -180,6 +183,8 @@ class CollectorForegroundService : Service() {
         cameraStreamer?.runCatching { CollectorCameraRuntime.detachStreamer(this) }
         cameraStreamer = null
         transferServer = null
+        recordingHttpServer?.runCatching { stop() }
+        recordingHttpServer = null
         serverExecutor?.runCatching { shutdownNow() }
         clientExecutor?.runCatching { shutdownNow() }
         maintenanceExecutor?.runCatching { shutdownNow() }
@@ -302,14 +307,21 @@ class CollectorForegroundService : Service() {
         val dates = library.listDates()
         val recordingFileIds = cameraStreamer?.currentRecordingFileId()?.let { setOf(it) } ?: emptySet()
         val files = message.date?.let { date -> library.listFiles(date, recordingFileIds) } ?: emptyList()
+        val checker = RecordingIntegrityChecker()
+        val annotatedFiles = files.map { entry ->
+            // 正在录制的文件本身不可播放（未 stop），不算损坏；仅检测已关闭的文件
+            val corrupted = !entry.recording && !checker.isPlayable(File(recordingRoot, entry.fileId))
+            entry.copy(corrupted = corrupted)
+        }
+        val corruptedCount = annotatedFiles.count { it.corrupted }
         writer.write(
             ControlProtocol.encode(
-                ControlMessage.RecordingList(dates = dates, files = files.map { it.toEntry() }),
+                ControlMessage.RecordingList(dates = dates, files = annotatedFiles.map { it.toEntry() }),
             ),
         )
         writer.newLine()
         writer.flush()
-        logNet("collector sent RecordingList date=${message.date} dates=${dates.size} files=${files.size} recording=${recordingFileIds.size}")
+        logNet("collector sent RecordingList date=${message.date} dates=${dates.size} files=${annotatedFiles.size} recording=${recordingFileIds.size} corrupted=$corruptedCount")
     }
 
     private fun handleOpenRecording(writer: BufferedWriter, message: ControlMessage.OpenRecording) {
@@ -336,7 +348,7 @@ class CollectorForegroundService : Service() {
     }
 
     private fun com.zx.homecamera.core.storage.RecordingFileEntry.toEntry(): RecordingEntry =
-        RecordingEntry(fileId = fileId, sizeBytes = sizeBytes, startMillis = startMillis, recording = recording)
+        RecordingEntry(fileId = fileId, sizeBytes = sizeBytes, startMillis = startMillis, recording = recording, corrupted = corrupted)
 
     private fun ExecutorService.executeCatching(block: () -> Unit) {
         execute {
@@ -480,6 +492,7 @@ class CollectorForegroundService : Service() {
         const val STATUS_RECORDING_ERROR = "recording_error"
         const val CONTROL_PORT = 62001
         const val STREAM_PORT = 62010
+        const val HTTP_PORT = 62003
         private const val CHANNEL_ID = "collector"
         private const val NOTIFICATION_ID = 1001
         private const val DEFAULT_STREAM_WIDTH = 640

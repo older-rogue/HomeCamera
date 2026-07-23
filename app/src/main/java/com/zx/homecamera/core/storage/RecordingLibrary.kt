@@ -68,4 +68,5 @@ data class RecordingFileEntry(
     val sizeBytes: Long,
     val startMillis: Long,
     val recording: Boolean = false,
+    val corrupted: Boolean = false,
 )
