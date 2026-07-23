@@ -8,6 +8,7 @@ import android.media.AudioTrack
 import android.media.MediaCodec
 import android.media.MediaCodecInfo
 import android.media.MediaFormat
+import android.os.Process
 import android.util.Log
 import android.view.Surface
 import com.zx.homecamera.audio.AacAudioConfig
@@ -26,6 +27,7 @@ import java.net.SocketException
 import java.net.SocketTimeoutException
 import java.nio.ByteBuffer
 import java.util.concurrent.ArrayBlockingQueue
+import java.util.concurrent.ConcurrentLinkedQueue
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
@@ -50,9 +52,10 @@ class H264UdpViewer {
             },
         )
         val audioQueue = ArrayBlockingQueue<EncodedMediaFrame>(AUDIO_QUEUE_CAPACITY)
+        val rawPacketQueue = ConcurrentLinkedQueue<ByteArray>()
         val udpSocket = connection.udpSocket ?: DatagramSocket(LanViewerConnector.CLIENT_UDP_PORT)
         val controlWriter = connection.controlSocket?.getOutputStream()?.bufferedWriter(Charsets.UTF_8)
-        val executor = Executors.newFixedThreadPool(4)
+        val executor = Executors.newFixedThreadPool(5)
         val session = ViewerSession(
             connection = connection,
             executor = executor,
@@ -61,12 +64,19 @@ class H264UdpViewer {
             controlWriter = controlWriter,
             videoQueue = videoQueue,
             audioQueue = audioQueue,
+            rawPacketQueue = rawPacketQueue,
             appContext = context.applicationContext,
         )
         currentSession.set(session)
 
         executor.executeCatching(session, onError) {
+            // receive 线程设为最高优先级，确保 socket.receive() 不被其他线程抢占，
+            // 避免内核 socket buffer 溢出导致丢包。
+            Process.setThreadPriority(Process.THREAD_PRIORITY_URGENT_AUDIO)
             receiveFrames(session)
+        }
+        executor.executeCatching(session, onError) {
+            reassembleFrames(session)
         }
         executor.executeCatching(session, onError) {
             decodeVideoFrames(session, surface, onFirstFrame)
@@ -84,17 +94,19 @@ class H264UdpViewer {
         session.stop(sendBye = true)
     }
 
+    /**
+     * 接收线程：只做 socket.receive() + 拷贝到独立 ByteArray + 入无锁队列。
+     * 不做 decode/reassemble/offer，不持任何锁，确保 receive() 以最高频率被调用，
+     * 避免内核 socket buffer 因来不及取包而溢出丢包。
+     */
     private fun receiveFrames(session: ViewerSession) {
-        val reassembler = MediaFrameReassembler()
         val buffer = ByteArray(MediaUdpPacket.DEFAULT_MAX_DATAGRAM_SIZE)
+        var lastPacketAtNanos = System.nanoTime()
+        var lastStatsLogAtMillis = System.currentTimeMillis()
+        var receivedPackets = 0L
         session.udpSocket.use { udpSocket ->
             udpSocket.receiveBufferSize = UDP_SOCKET_BUFFER_BYTES
             udpSocket.soTimeout = UDP_RECEIVE_TIMEOUT_MILLIS.toInt()
-            var completedVideoFrames = 0L
-            var completedAudioFrames = 0L
-            var lastStatsLogAtMillis = System.currentTimeMillis()
-            var lastPacketAtNanos = System.nanoTime()
-            var incompleteFragments = 0L
             while (session.running.get()) {
                 val packet = DatagramPacket(buffer, buffer.size)
                 try {
@@ -103,32 +115,17 @@ class H264UdpViewer {
                     val packetIntervalMs = (packetNanos - lastPacketAtNanos) / 1_000_000.0
                     lastPacketAtNanos = packetNanos
                     session.lastPacketAtMillis.set(System.currentTimeMillis())
-                    val streamPacket = MediaUdpPacket.decode(packet.data, packet.length) ?: continue
-                    val frame = reassembler.accept(streamPacket)
-                    if (frame == null) {
-                        incompleteFragments++
-                        continue
-                    }
-                    when (frame.track) {
-                        MediaTrack.Video -> if (frame.codec == MediaCodecType.H264) {
-                            completedVideoFrames++
-                            session.videoQueue.offer(frame)
-                        }
-
-                        MediaTrack.Audio -> if (frame.codec == MediaCodecType.Aac) {
-                            completedAudioFrames++
-                            offerLatestAudioFrame(session.audioQueue, frame)
-                        }
-                    }
+                    // 拷贝到独立数组后立即入队，让 receive 循环尽快回到下一次 receive()。
+                    val copy = packet.data.copyOf(packet.length)
+                    session.rawPacketQueue.offer(copy)
+                    receivedPackets++
                     if (packetIntervalMs > 50.0) {
                         Log.w(TAG, "udp recv gap: %.0fms".format(packetIntervalMs))
                     }
                     val now = System.currentTimeMillis()
                     if (now - lastStatsLogAtMillis >= STATS_LOG_INTERVAL_MILLIS) {
-                        Log.i(TAG, "udp receiver: video=$completedVideoFrames audio=$completedAudioFrames incomplete=$incompleteFragments")
-                        completedVideoFrames = 0L
-                        completedAudioFrames = 0L
-                        incompleteFragments = 0L
+                        Log.i(TAG, "udp receiver: packets=$receivedPackets queue=${session.rawPacketQueue.size}")
+                        receivedPackets = 0L
                         lastStatsLogAtMillis = now
                     }
                 } catch (_: SocketTimeoutException) {
@@ -138,6 +135,51 @@ class H264UdpViewer {
                 } catch (_: SocketException) {
                     if (session.running.get()) throw IllegalStateException("UDP 视频端口异常")
                 }
+            }
+        }
+    }
+
+    /**
+     * 重组线程：从无锁队列取原始字节 -> decode -> reassemble -> offer 到 videoQueue/audioQueue。
+     * 与 receive 线程分离，避免 decode/reassemble 的 HashMap/数组拷贝阻塞 receive。
+     */
+    private fun reassembleFrames(session: ViewerSession) {
+        val reassembler = MediaFrameReassembler()
+        var completedVideoFrames = 0L
+        var completedAudioFrames = 0L
+        var incompleteFragments = 0L
+        var lastStatsLogAtMillis = System.currentTimeMillis()
+        while (session.running.get()) {
+            val raw = session.rawPacketQueue.poll()
+            if (raw == null) {
+                // 队列空时短暂休眠，避免空转占 CPU
+                Thread.sleep(1L)
+                continue
+            }
+            val streamPacket = MediaUdpPacket.decode(raw, raw.size) ?: continue
+            val frame = reassembler.accept(streamPacket)
+            if (frame == null) {
+                incompleteFragments++
+                continue
+            }
+            when (frame.track) {
+                MediaTrack.Video -> if (frame.codec == MediaCodecType.H264) {
+                    completedVideoFrames++
+                    session.videoQueue.offer(frame)
+                }
+
+                MediaTrack.Audio -> if (frame.codec == MediaCodecType.Aac) {
+                    completedAudioFrames++
+                    offerLatestAudioFrame(session.audioQueue, frame)
+                }
+            }
+            val now = System.currentTimeMillis()
+            if (now - lastStatsLogAtMillis >= STATS_LOG_INTERVAL_MILLIS) {
+                Log.i(TAG, "reassembler: video=$completedVideoFrames audio=$completedAudioFrames incomplete=$incompleteFragments queue=${session.rawPacketQueue.size}")
+                completedVideoFrames = 0L
+                completedAudioFrames = 0L
+                incompleteFragments = 0L
+                lastStatsLogAtMillis = now
             }
         }
     }
@@ -494,6 +536,7 @@ class H264UdpViewer {
         val controlWriter: BufferedWriter?,
         val videoQueue: RealtimeVideoFrameQueue,
         val audioQueue: ArrayBlockingQueue<EncodedMediaFrame>,
+        val rawPacketQueue: ConcurrentLinkedQueue<ByteArray>,
         val appContext: Context,
     ) {
         val running = AtomicBoolean(true)
@@ -515,6 +558,7 @@ class H264UdpViewer {
             udpSocket.runCatching { close() }
             videoQueue.clear()
             audioQueue.clear()
+            rawPacketQueue.clear()
             controlSocket?.runCatching { close() }
             executor.shutdownNow()
             executor.runCatching { awaitTermination(WORKER_STOP_TIMEOUT_MILLIS, TimeUnit.MILLISECONDS) }

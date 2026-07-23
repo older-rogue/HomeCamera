@@ -29,7 +29,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import com.zx.homecamera.MainActivity
+import com.zx.homecamera.ui.activity.RoleSelectionActivity
 import com.zx.homecamera.local.LocalData
 import com.zx.homecamera.ui.theme.HomeCameraTheme
 import com.zx.homecamera.ui.theme.Purple40
@@ -50,7 +50,7 @@ class IntroActivity : ComponentActivity() {
                 IntroScreen(
                     onAgree = {
                         LocalData.setIsFirst(this)
-                        startActivity(Intent(this, MainActivity::class.java))
+                        startActivity(Intent(this, RoleSelectionActivity::class.java))
                         finish()
                     },
                     onDisagree = {

@@ -11,7 +11,7 @@ data class H264StreamSelection(
 )
 
 object H264StreamConfigSelector {
-    private val maxStreamSize = VideoSize(1280, 720)
+    private val maxStreamSize = VideoSize(H264StreamConfig.WIDTH, H264StreamConfig.HEIGHT)
 
     fun choose(
         supportedSizes: List<VideoSize>,

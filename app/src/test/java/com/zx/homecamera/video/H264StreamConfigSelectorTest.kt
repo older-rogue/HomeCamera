@@ -5,7 +5,7 @@ import org.junit.Test
 
 class H264StreamConfigSelectorTest {
     @Test
-    fun choosesSupportedStreamSizeThatMatchesRotatedPortraitSurface() {
+    fun choosesUdpFriendlyStreamSizeForRotatedPortraitSurface() {
         val config = H264StreamConfigSelector.choose(
             supportedSizes = listOf(
                 VideoSize(1920, 1080),
@@ -18,8 +18,8 @@ class H264StreamConfigSelectorTest {
             displayRotationDegrees = 0,
         )
 
-        assertEquals(VideoSize(1280, 720), config.bufferSize)
-        assertEquals(VideoSize(720, 1280), config.displaySize)
+        assertEquals(VideoSize(640, 480), config.bufferSize)
+        assertEquals(VideoSize(480, 640), config.displaySize)
     }
 
     @Test
@@ -40,7 +40,7 @@ class H264StreamConfigSelectorTest {
     }
 
     @Test
-    fun derivesBitrateAndFpsFromSelectedResolution() {
+    fun derivesUdpFriendlyBitrateAndFpsFromSelectedResolution() {
         val config = H264StreamConfigSelector.choose(
             supportedSizes = listOf(VideoSize(1280, 720)),
             surfaceWidth = 1080,
@@ -50,7 +50,7 @@ class H264StreamConfigSelectorTest {
         )
 
         assertEquals(15, config.fps)
-        assertEquals(2_400_000, config.bitrate)
+        assertEquals(900_000, config.bitrate)
         assertEquals(H264StreamConfig.I_FRAME_INTERVAL_SECONDS, config.iFrameIntervalSeconds)
     }
 }

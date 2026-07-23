@@ -1,20 +1,12 @@
 package com.zx.homecamera.core.app
 
+import android.content.Intent
 import com.zx.homecamera.core.protocol.RecordingEntry
 import java.io.File
 
 enum class AppRole {
     Collector,
     Client,
-}
-
-enum class Screen {
-    RoleSelection,
-    Collector,
-    ClientList,
-    Viewer,
-    RecordingLibrary,
-    RecordingPlayback,
 }
 
 enum class ServiceStatus {
@@ -73,7 +65,36 @@ data class CollectorDevice(
     val hostAddress: String,
     val tcpPort: Int,
     val online: Boolean,
-)
+) {
+    fun toIntent(intent: Intent) {
+        intent.putExtra(EXTRA_DEVICE_ID, deviceId)
+        intent.putExtra(EXTRA_DEVICE_NAME, name)
+        intent.putExtra(EXTRA_HOST_ADDRESS, hostAddress)
+        intent.putExtra(EXTRA_TCP_PORT, tcpPort)
+        intent.putExtra(EXTRA_ONLINE, online)
+    }
+
+    companion object {
+        const val EXTRA_DEVICE_ID = "device_id"
+        const val EXTRA_DEVICE_NAME = "device_name"
+        const val EXTRA_HOST_ADDRESS = "host_address"
+        const val EXTRA_TCP_PORT = "tcp_port"
+        const val EXTRA_ONLINE = "online"
+
+        fun fromIntent(intent: Intent): CollectorDevice? {
+            val hostAddress = intent.getStringExtra(EXTRA_HOST_ADDRESS) ?: return null
+            val tcpPort = intent.getIntExtra(EXTRA_TCP_PORT, -1)
+            if (tcpPort < 0) return null
+            return CollectorDevice(
+                deviceId = intent.getStringExtra(EXTRA_DEVICE_ID) ?: "$hostAddress:$tcpPort",
+                name = intent.getStringExtra(EXTRA_DEVICE_NAME) ?: "采集端 $hostAddress",
+                hostAddress = hostAddress,
+                tcpPort = tcpPort,
+                online = intent.getBooleanExtra(EXTRA_ONLINE, true),
+            )
+        }
+    }
+}
 
 data class CollectorState(
     val serviceStatus: ServiceStatus = ServiceStatus.NotStarted,
@@ -112,266 +133,3 @@ data class RecordingPlaybackState(
     val savedToGallery: Boolean = false,
     val savingToGallery: Boolean = false,
 )
-
-data class HomeCameraState(
-    val role: AppRole? = null,
-    val screen: Screen = Screen.RoleSelection,
-    val collector: CollectorState = CollectorState(),
-    val client: ClientState = ClientState(),
-    val viewer: ViewerState = ViewerState(),
-    val recordingLibrary: RecordingLibraryState = RecordingLibraryState(),
-    val recordingPlayback: RecordingPlaybackState = RecordingPlaybackState(),
-)
-
-sealed interface HomeCameraAction {
-    data class SelectRole(val role: AppRole) : HomeCameraAction
-    data object StartCollector : HomeCameraAction
-    data object CollectorStarted : HomeCameraAction
-    data class CollectorFailed(val reason: String) : HomeCameraAction
-    data class RecordingFailed(val reason: String) : HomeCameraAction
-    data class ClientCountChanged(val count: Int) : HomeCameraAction
-    data object StopCollector : HomeCameraAction
-    data object StartScan : HomeCameraAction
-    data class DevicesDiscovered(val devices: List<CollectorDevice>) : HomeCameraAction
-    data class ScanFailed(val reason: String) : HomeCameraAction
-    data class OpenViewer(val deviceId: String) : HomeCameraAction
-    data class ViewerStatusChanged(val status: ViewerStatus, val errorMessage: String? = null) : HomeCameraAction
-    data object BackToClientList : HomeCameraAction
-    data object BackToRoleSelection : HomeCameraAction
-    data object OpenRecordingLibrary : HomeCameraAction
-    data object RefreshRecordingLibrary : HomeCameraAction
-    data class SelectRecordingDate(val date: String) : HomeCameraAction
-    data class RecordingDatesLoaded(val dates: List<String>, val errorMessage: String? = null) : HomeCameraAction
-    data class RecordingFilesLoaded(val date: String, val files: List<RecordingEntry>, val errorMessage: String? = null) : HomeCameraAction
-    data class DownloadRecording(val fileId: String) : HomeCameraAction
-    data class DownloadProgressChanged(val fileId: String, val transferred: Long, val total: Long) : HomeCameraAction
-    data class DownloadCompleted(val fileId: String, val errorMessage: String? = null) : HomeCameraAction
-    data class OpenRecordingPlayback(val fileId: String) : HomeCameraAction
-    data class RecordingPlaybackLoaded(val fileId: String, val cachedFile: File?, val errorMessage: String? = null) : HomeCameraAction
-    data class RecordingPlaybackStatusChanged(val status: RecordingPlaybackStatus, val errorMessage: String? = null) : HomeCameraAction
-    data class RecordingPlaybackSavedToGallery(val success: Boolean) : HomeCameraAction
-    data object SavePlaybackToGallery : HomeCameraAction
-    data object BackToViewer : HomeCameraAction
-    data object BackToRecordingLibrary : HomeCameraAction
-}
-
-object HomeCameraReducer {
-    fun reduce(state: HomeCameraState, action: HomeCameraAction): HomeCameraState =
-        when (action) {
-            is HomeCameraAction.SelectRole -> when (action.role) {
-                AppRole.Collector -> state.copy(
-                    role = AppRole.Collector,
-                    screen = Screen.Collector,
-                )
-
-                AppRole.Client -> state.copy(
-                    role = AppRole.Client,
-                    screen = Screen.ClientList,
-                )
-            }
-
-            HomeCameraAction.StartCollector -> state.copy(
-                collector = state.collector.copy(
-                    serviceStatus = ServiceStatus.Starting,
-                    recordingStatus = RecordingStatus.Starting,
-                    errorMessage = null,
-                ),
-            )
-
-            HomeCameraAction.CollectorStarted -> state.copy(
-                collector = state.collector.copy(
-                    serviceStatus = ServiceStatus.Running,
-                    recordingStatus = RecordingStatus.Recording,
-                    errorMessage = null,
-                ),
-            )
-
-            is HomeCameraAction.CollectorFailed -> state.copy(
-                collector = state.collector.copy(
-                    serviceStatus = ServiceStatus.Error,
-                    recordingStatus = RecordingStatus.Error,
-                    errorMessage = action.reason,
-                ),
-            )
-
-            is HomeCameraAction.RecordingFailed -> state.copy(
-                collector = state.collector.copy(
-                    recordingStatus = RecordingStatus.Error,
-                    errorMessage = action.reason,
-                ),
-            )
-
-            is HomeCameraAction.ClientCountChanged -> state.copy(
-                collector = state.collector.copy(
-                    connectedClientCount = action.count,
-                    connectionStatus = if (action.count > 0) {
-                        ConnectionStatus.Connected
-                    } else {
-                        ConnectionStatus.NoClient
-                    },
-                ),
-            )
-
-            HomeCameraAction.StopCollector -> state.copy(
-                collector = state.collector.copy(
-                    serviceStatus = ServiceStatus.Stopped,
-                    recordingStatus = RecordingStatus.Idle,
-                    connectedClientCount = 0,
-                    connectionStatus = ConnectionStatus.NoClient,
-                ),
-            )
-
-            HomeCameraAction.StartScan -> state.copy(
-                client = state.client.copy(
-                    scanStatus = ScanStatus.Scanning,
-                    devices = emptyList(),
-                ),
-            )
-
-            is HomeCameraAction.DevicesDiscovered -> state.copy(
-                client = state.client.copy(
-                    scanStatus = ScanStatus.Finished,
-                    devices = action.devices.sortedWith(compareByDescending<CollectorDevice> { it.online }.thenBy { it.name }),
-                ),
-            )
-
-            is HomeCameraAction.ScanFailed -> state.copy(
-                client = state.client.copy(scanStatus = ScanStatus.Error),
-            )
-
-            is HomeCameraAction.OpenViewer -> {
-                val device = state.client.devices.firstOrNull { it.deviceId == action.deviceId }
-                if (device == null) {
-                    state
-                } else {
-                    state.copy(
-                        screen = Screen.Viewer,
-                        viewer = ViewerState(
-                            selectedDevice = device,
-                            status = ViewerStatus.Connecting,
-                        ),
-                    )
-                }
-            }
-
-            is HomeCameraAction.ViewerStatusChanged -> state.copy(
-                viewer = state.viewer.copy(
-                    status = action.status,
-                    errorMessage = action.errorMessage,
-                ),
-            )
-
-            HomeCameraAction.BackToClientList -> state.copy(
-                screen = Screen.ClientList,
-                viewer = ViewerState(),
-            )
-
-            HomeCameraAction.BackToRoleSelection -> HomeCameraState()
-
-            HomeCameraAction.OpenRecordingLibrary -> state.copy(
-                screen = Screen.RecordingLibrary,
-                recordingLibrary = RecordingLibraryState(),
-            )
-
-            HomeCameraAction.RefreshRecordingLibrary -> state
-
-            is HomeCameraAction.SelectRecordingDate -> state.copy(
-                recordingLibrary = state.recordingLibrary.copy(
-                    status = RecordingLibraryStatus.Loading,
-                    selectedDate = action.date,
-                    files = emptyList(),
-                    errorMessage = null,
-                ),
-            )
-
-            is HomeCameraAction.RecordingDatesLoaded -> {
-                val selectedDate = state.recordingLibrary.selectedDate
-                    ?: action.dates.firstOrNull()
-                state.copy(
-                    recordingLibrary = state.recordingLibrary.copy(
-                        status = if (action.errorMessage != null) RecordingLibraryStatus.Error else RecordingLibraryStatus.Loaded,
-                        dates = action.dates,
-                        selectedDate = selectedDate,
-                        errorMessage = action.errorMessage,
-                    ),
-                )
-            }
-
-            is HomeCameraAction.RecordingFilesLoaded -> state.copy(
-                recordingLibrary = state.recordingLibrary.copy(
-                    status = if (action.errorMessage != null) RecordingLibraryStatus.Error else RecordingLibraryStatus.Loaded,
-                    selectedDate = action.date,
-                    files = action.files,
-                    errorMessage = action.errorMessage,
-                ),
-            )
-
-            is HomeCameraAction.DownloadRecording -> state.copy(
-                recordingLibrary = state.recordingLibrary.copy(
-                    downloadingFileId = action.fileId,
-                    downloadProgress = 0f,
-                ),
-            )
-
-            is HomeCameraAction.DownloadProgressChanged -> {
-                val progress = if (action.total > 0) action.transferred.toFloat() / action.total else 0f
-                state.copy(
-                    recordingLibrary = state.recordingLibrary.copy(
-                        downloadingFileId = action.fileId,
-                        downloadProgress = progress.coerceIn(0f, 1f),
-                    ),
-                )
-            }
-
-            is HomeCameraAction.DownloadCompleted -> state.copy(
-                recordingLibrary = state.recordingLibrary.copy(
-                    downloadingFileId = null,
-                    downloadProgress = 0f,
-                    errorMessage = action.errorMessage,
-                ),
-            )
-
-            is HomeCameraAction.OpenRecordingPlayback -> state.copy(
-                screen = Screen.RecordingPlayback,
-                recordingPlayback = RecordingPlaybackState(
-                    fileId = action.fileId,
-                    status = RecordingPlaybackStatus.Loading,
-                ),
-            )
-
-            is HomeCameraAction.RecordingPlaybackLoaded -> state.copy(
-                recordingPlayback = state.recordingPlayback.copy(
-                    fileId = action.fileId,
-                    status = if (action.cachedFile != null) RecordingPlaybackStatus.Playing else RecordingPlaybackStatus.Error,
-                    cachedFile = action.cachedFile,
-                    errorMessage = action.errorMessage,
-                ),
-            )
-
-            is HomeCameraAction.RecordingPlaybackStatusChanged -> state.copy(
-                recordingPlayback = state.recordingPlayback.copy(
-                    status = action.status,
-                    errorMessage = action.errorMessage,
-                ),
-            )
-
-            is HomeCameraAction.RecordingPlaybackSavedToGallery -> state.copy(
-                recordingPlayback = state.recordingPlayback.copy(
-                    savedToGallery = action.success,
-                    savingToGallery = false,
-                ),
-            )
-
-            HomeCameraAction.SavePlaybackToGallery -> state
-
-            HomeCameraAction.BackToViewer -> state.copy(
-                screen = Screen.Viewer,
-                recordingLibrary = RecordingLibraryState(),
-            )
-
-            HomeCameraAction.BackToRecordingLibrary -> state.copy(
-                screen = Screen.RecordingLibrary,
-                recordingPlayback = RecordingPlaybackState(),
-            )
-        }
-}

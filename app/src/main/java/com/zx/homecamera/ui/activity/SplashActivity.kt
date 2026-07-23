@@ -32,7 +32,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import com.zx.homecamera.MainActivity
+import com.zx.homecamera.ui.activity.RoleSelectionActivity
 import com.zx.homecamera.local.LocalData
 import com.zx.homecamera.network.ApiService
 import com.zx.homecamera.network.UpdateInfo
@@ -73,7 +73,7 @@ class SplashActivity : ComponentActivity() {
         val intent = if (LocalData.getIsFirst(this)) {
             Intent(this, IntroActivity::class.java)
         } else {
-            Intent(this, MainActivity::class.java)
+            Intent(this, RoleSelectionActivity::class.java)
         }
         startActivity(intent)
         finish()
