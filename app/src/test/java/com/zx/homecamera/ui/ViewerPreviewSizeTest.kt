@@ -1,6 +1,7 @@
 package com.zx.homecamera.ui
 
 import com.zx.homecamera.network.ViewerConnection
+import com.zx.homecamera.video.H264StreamConfig
 import com.zx.homecamera.video.VideoSize
 import org.junit.Assert.assertEquals
 import org.junit.Test
@@ -27,8 +28,14 @@ class ViewerPreviewSizeTest {
 
     @Test
     fun fallsBackToPortraitDefaultBeforeConnectionCompletes() {
-        assertEquals(VideoSize(480, 640), ViewerPreviewSize.displaySize(null))
-        assertEquals(VideoSize(640, 480), ViewerPreviewSize.surfaceSize(null))
+        assertEquals(
+            VideoSize(H264StreamConfig.HEIGHT, H264StreamConfig.WIDTH),
+            ViewerPreviewSize.displaySize(null),
+        )
+        assertEquals(
+            VideoSize(H264StreamConfig.WIDTH, H264StreamConfig.HEIGHT),
+            ViewerPreviewSize.surfaceSize(null),
+        )
         assertEquals(90f, ViewerPreviewSize.rotationDegrees(null))
     }
 
