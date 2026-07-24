@@ -18,6 +18,7 @@ class Mp4SegmentRecorder(
         RecordingFilePlanner.SEGMENT_DURATION_MILLIS * 1_000L,
     ),
     private val onError: (Throwable) -> Unit = {},
+    private val onSegmentStarted: () -> Unit = {},
 ) {
     private var videoOutputFormat: MediaFormat? = null
     private var audioOutputFormat: MediaFormat? = null
@@ -170,6 +171,7 @@ class Mp4SegmentRecorder(
         audioSegmentBaseMicros = -1L
         audioBaseCaptured = false
         clock.onSegmentStarted(timestampMicros)
+        onSegmentStarted()
     }
 
     private fun closeCurrentSegment() {

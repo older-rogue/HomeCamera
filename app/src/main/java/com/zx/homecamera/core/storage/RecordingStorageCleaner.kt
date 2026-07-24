@@ -11,12 +11,17 @@ class RecordingStorageCleaner(
         today: LocalDate,
         usableBytes: Long,
     ): CleanResult {
-        val deleted = policy.directoriesToDelete(root, today, usableBytes)
-            .filter { it.deleteRecursively() }
-        return CleanResult(deletedDirectories = deleted)
+        val plan = policy.deletionPlan(root, today, usableBytes)
+        val deletedDirectories = plan.directories.filter { it.deleteRecursively() }
+        val deletedFiles = plan.files.filter { it.delete() }
+        return CleanResult(
+            deletedDirectories = deletedDirectories,
+            deletedFiles = deletedFiles,
+        )
     }
 }
 
 data class CleanResult(
     val deletedDirectories: List<File>,
+    val deletedFiles: List<File> = emptyList(),
 )

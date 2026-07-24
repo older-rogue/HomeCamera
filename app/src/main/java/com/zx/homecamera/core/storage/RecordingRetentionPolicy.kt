@@ -6,15 +6,15 @@ import java.time.format.DateTimeFormatter
 
 class RecordingRetentionPolicy(
     private val keepDays: Long = 7,
-    private val minimumFreeBytes: Long = 512L * 1024L * 1024L,
+    private val minimumFreeBytes: Long = 2L * 1024L * 1024L * 1024L,
 ) {
     private val directoryFormatter = DateTimeFormatter.ISO_LOCAL_DATE
 
-    fun directoriesToDelete(
+    fun deletionPlan(
         root: File,
         today: LocalDate,
         usableBytes: Long,
-    ): List<File> {
+    ): DeletionPlan {
         val dateDirectories = root.listFiles()
             ?.filter { it.isDirectory }
             ?.mapNotNull { file -> file.parseDateDirectory()?.let { date -> date to file } }
@@ -26,22 +26,26 @@ class RecordingRetentionPolicy(
             .filter { (date, _) -> date.isBefore(oldestKeptDate) }
             .map { (_, file) -> file }
 
-        val expiredSet = expired.toSet()
         var projectedUsableBytes = usableBytes + expired.sumOf { it.sizeBytes() }
-        if (projectedUsableBytes >= minimumFreeBytes) return expired
+        if (projectedUsableBytes >= minimumFreeBytes) return DeletionPlan(expired, emptyList())
 
-        val pressureDeletions = dateDirectories
-            .asSequence()
-            .map { (_, file) -> file }
-            .filterNot { it in expiredSet }
-            .takeWhileInclusive { file ->
-                val shouldTake = projectedUsableBytes < minimumFreeBytes
-                if (shouldTake) projectedUsableBytes += file.sizeBytes()
-                shouldTake
+        // 空间压力删除：从未过期目录里按日期从旧到新，逐个删最旧 mp4 文件，
+        // 直到投影可用空间达标（含达标那一个，与原 takeWhileInclusive 语义一致）。
+        val expiredSet = expired.toSet()
+        val pressureFiles = mutableListOf<File>()
+        for ((_, directory) in dateDirectories.filterNot { it.second in expiredSet }) {
+            if (projectedUsableBytes >= minimumFreeBytes) break
+            // mp4 文件名 HH-mm-ss，字典序即时间序
+            val files = directory.listFiles { it.isFile && it.extension.equals("mp4", true) }
+                ?.sortedBy { it.nameWithoutExtension }
+                .orEmpty()
+            for (file in files) {
+                pressureFiles.add(file)
+                projectedUsableBytes += file.length()
+                if (projectedUsableBytes >= minimumFreeBytes) break
             }
-            .toList()
-
-        return expired + pressureDeletions
+        }
+        return DeletionPlan(expired, pressureFiles)
     }
 
     private fun File.parseDateDirectory(): LocalDate? =
@@ -53,12 +57,9 @@ class RecordingRetentionPolicy(
             .filter { it.isFile }
             .sumOf { it.length() }
     }
-
-    private fun <T> Sequence<T>.takeWhileInclusive(predicate: (T) -> Boolean): Sequence<T> =
-        sequence {
-            for (item in this@takeWhileInclusive) {
-                if (!predicate(item)) break
-                yield(item)
-            }
-        }
 }
+
+data class DeletionPlan(
+    val directories: List<File>,
+    val files: List<File>,
+)

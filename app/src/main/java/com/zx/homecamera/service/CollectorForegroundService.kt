@@ -99,6 +99,13 @@ class CollectorForegroundService : Service() {
                         error.message ?: "录像写入失败",
                     )
                 },
+                onSegmentStarted = {
+                    // 每次切片（约 2 分钟）触发一次异步清理，避免运行期间持续写入撑满磁盘。
+                    // maintenanceExecutor 是单线程执行器，任务自动串行；executeCatching 内部
+                    // 的 execute{} 在 runCatching 外，shutdownNow 后提交会抛 RejectedExecutionException，
+                    // 外层 runCatching 确保停止过程中触发的回调不崩溃。
+                    runCatching { maintenanceExecutor?.executeCatching(::cleanRecordingsOnce) }
+                },
             )
             cameraStreamer = streamer
             CollectorCameraRuntime.attachStreamer(streamer)

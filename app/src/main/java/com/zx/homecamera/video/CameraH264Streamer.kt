@@ -40,6 +40,7 @@ class CameraH264Streamer(
     private val context: Context,
     recordingRoot: File? = context.getExternalFilesDir(null)?.resolve("recordings"),
     private val onRecordingError: (Throwable) -> Unit = {},
+    private val onSegmentStarted: () -> Unit = {},
 ) {
     private val running = AtomicBoolean(false)
     private val sequenceNumber = AtomicInteger(0)
@@ -84,7 +85,7 @@ class CameraH264Streamer(
     private var activeAudioConfig: AacAudioConfig = AacAudioConfig.Default.copy(enabled = false)
     private var audioStreamer: AacAudioStreamer? = null
     private val recorder = recordingRoot?.let { root ->
-        Mp4SegmentRecorder(root, onError = onRecordingError)
+        Mp4SegmentRecorder(root, onError = onRecordingError, onSegmentStarted = onSegmentStarted)
     }
 
     fun start() {
