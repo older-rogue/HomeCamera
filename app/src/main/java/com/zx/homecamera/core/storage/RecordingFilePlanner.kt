@@ -16,7 +16,7 @@ class RecordingFilePlanner(
     }
 
     companion object {
-        const val SEGMENT_DURATION_MILLIS = 10 * 60 * 1000L
+        const val SEGMENT_DURATION_MILLIS = 2 * 60 * 1000L
         private val DATE_FORMATTER = DateTimeFormatter.ISO_LOCAL_DATE
         private val TIME_FORMATTER = DateTimeFormatter.ofPattern("HH-mm-ss")
     }

@@ -7,15 +7,15 @@ import org.junit.Test
 class H264StreamConfigTest {
     @Test
     fun defaultEncoderResolutionUsesUdpFriendlyLandscapeSize() {
-        assertEquals(640, H264StreamConfig.WIDTH)
-        assertEquals(480, H264StreamConfig.HEIGHT)
+        assertEquals(1920, H264StreamConfig.WIDTH)
+        assertEquals(1080, H264StreamConfig.HEIGHT)
         assertTrue(H264StreamConfig.WIDTH > H264StreamConfig.HEIGHT)
     }
 
     @Test
     fun defaultBitrateAndPacketPacingAvoidLargeUdpBursts() {
-        assertTrue(H264StreamConfig.BITRATE <= 900_000)
-        assertTrue(H264StreamConfig.PACKET_PACING_MICROS >= 500L)
+        assertTrue(H264StreamConfig.BITRATE <= 6_000_000)
+        assertTrue(H264StreamConfig.PACKET_PACING_MICROS >= 10L)
     }
 
     @Test

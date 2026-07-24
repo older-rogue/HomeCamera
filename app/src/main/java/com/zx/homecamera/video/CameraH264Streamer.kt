@@ -224,7 +224,7 @@ class CameraH264Streamer(
             setInteger(MediaFormat.KEY_COLOR_FORMAT, MediaCodecInfo.CodecCapabilities.COLOR_FormatSurface)
             setInteger(MediaFormat.KEY_BIT_RATE, selection.bitrate)
             setInteger(MediaFormat.KEY_FRAME_RATE, selection.fps)
-            setInteger(MediaFormat.KEY_BITRATE_MODE, MediaCodecInfo.EncoderCapabilities.BITRATE_MODE_CBR)
+            setInteger(MediaFormat.KEY_BITRATE_MODE, MediaCodecInfo.EncoderCapabilities.BITRATE_MODE_VBR)
             setInteger(MediaFormat.KEY_I_FRAME_INTERVAL, selection.iFrameIntervalSeconds)
         }
 

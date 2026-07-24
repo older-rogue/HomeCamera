@@ -24,7 +24,7 @@ class RecordingFilePlannerTest {
     }
 
     @Test
-    fun segmentDurationIsTenMinutes() {
-        assertEquals(10 * 60 * 1000L, RecordingFilePlanner.SEGMENT_DURATION_MILLIS)
+    fun segmentDurationIsTwoMinutes() {
+        assertEquals(2 * 60 * 1000L, RecordingFilePlanner.SEGMENT_DURATION_MILLIS)
     }
 }

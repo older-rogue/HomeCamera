@@ -1,7 +1,5 @@
 package com.zx.homecamera.video
 
-import kotlin.math.abs
-
 data class H264StreamSelection(
     val bufferSize: VideoSize,
     val displaySize: VideoSize,
@@ -26,13 +24,9 @@ object H264StreamConfigSelector {
             .filter { it.width <= maxStreamSize.width && it.height <= maxStreamSize.height }
             .ifEmpty { candidates }
 
-        val bufferSize = chooseBufferSize(
-            supportedSizes = boundedCandidates,
-            surfaceWidth = surfaceWidth,
-            surfaceHeight = surfaceHeight,
-            sensorOrientationDegrees = sensorOrientationDegrees,
-            displayRotationDegrees = displayRotationDegrees,
-        )
+        // 编码分辨率固定为配置上限内的最大可用尺寸，不再依赖预览容器尺寸匹配。
+        // 客户端负责全屏渲染适配，编码尺寸与预览 UI 解耦。
+        val bufferSize = boundedCandidates.maxByOrNull { it.area } ?: fallback
         val displaySize = PreviewSizeSelector.displaySize(
             previewSize = bufferSize,
             sensorOrientationDegrees = sensorOrientationDegrees,
@@ -45,30 +39,5 @@ object H264StreamConfigSelector {
             bitrate = H264StreamConfig.BITRATE,
             iFrameIntervalSeconds = H264StreamConfig.I_FRAME_INTERVAL_SECONDS,
         )
-    }
-
-    private fun chooseBufferSize(
-        supportedSizes: List<VideoSize>,
-        surfaceWidth: Int,
-        surfaceHeight: Int,
-        sensorOrientationDegrees: Int,
-        displayRotationDegrees: Int,
-    ): VideoSize {
-        if (surfaceWidth <= 0 || surfaceHeight <= 0) {
-            return supportedSizes.firstOrNull() ?: VideoSize(H264StreamConfig.WIDTH, H264StreamConfig.HEIGHT)
-        }
-
-        val targetAspectRatio = surfaceWidth.toDouble() / surfaceHeight.toDouble()
-        val targetArea = surfaceWidth * surfaceHeight
-        return supportedSizes.minBy { size ->
-            val displaySize = PreviewSizeSelector.displaySize(
-                previewSize = size,
-                sensorOrientationDegrees = sensorOrientationDegrees,
-                displayRotationDegrees = displayRotationDegrees,
-            )
-            val aspectPenalty = abs(displaySize.aspectRatio - targetAspectRatio) * 10_000
-            val areaPenalty = abs(displaySize.area - targetArea).toDouble() / targetArea.coerceAtLeast(1)
-            aspectPenalty + areaPenalty
-        }
     }
 }
