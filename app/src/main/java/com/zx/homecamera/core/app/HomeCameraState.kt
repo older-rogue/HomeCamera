@@ -52,6 +52,16 @@ enum class RecordingLibraryStatus {
     Error,
 }
 
+enum class DownloadStatus {
+    Queued,
+    Downloading,
+}
+
+data class DownloadTaskState(
+    val status: DownloadStatus,
+    val progress: Float,
+)
+
 enum class RecordingPlaybackStatus {
     Loading,
     Playing,
@@ -119,8 +129,7 @@ data class RecordingLibraryState(
     val dates: List<String> = emptyList(),
     val selectedDate: String? = null,
     val files: List<RecordingEntry> = emptyList(),
-    val downloadingFileId: String? = null,
-    val downloadProgress: Float = 0f,
+    val downloads: Map<String, DownloadTaskState> = emptyMap(),
     val downloadedFileIds: Set<String> = emptySet(),
     val errorMessage: String? = null,
 )

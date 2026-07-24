@@ -43,6 +43,7 @@ import androidx.compose.ui.unit.sp
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.zx.homecamera.RecordingLibraryViewModel
 import com.zx.homecamera.core.app.CollectorDevice
+import com.zx.homecamera.core.app.DownloadStatus
 import com.zx.homecamera.core.app.RecordingLibraryStatus
 import com.zx.homecamera.core.protocol.RecordingEntry
 import com.zx.homecamera.ui.AppTopBar
@@ -148,13 +149,15 @@ class RecordingLibraryActivity : ComponentActivity() {
                             else -> {
                                 LazyColumn(verticalArrangement = Arrangement.spacedBy(10.dp)) {
                                     items(state.files, key = { it.fileId }) { entry ->
+                                        val task = state.downloads[entry.fileId]
                                         RecordingFileItem(
                                             entry = entry,
-                                            isDownloading = state.downloadingFileId == entry.fileId,
-                                            downloadProgress = if (state.downloadingFileId == entry.fileId) state.downloadProgress else 0f,
+                                            downloadStatus = task?.status,
+                                            downloadProgress = task?.progress ?: 0f,
                                             isDownloaded = entry.fileId in state.downloadedFileIds,
                                             onPlay = { openPlayback(device!!, entry) },
                                             onDownload = { viewModel.downloadRecordingToGallery(entry.fileId) },
+                                            onCancel = { viewModel.cancelDownload(entry.fileId) },
                                         )
                                     }
                                 }
@@ -177,14 +180,17 @@ class RecordingLibraryActivity : ComponentActivity() {
 @Composable
 private fun RecordingFileItem(
     entry: RecordingEntry,
-    isDownloading: Boolean,
+    downloadStatus: DownloadStatus?,
     downloadProgress: Float,
     isDownloaded: Boolean,
     onPlay: () -> Unit,
     onDownload: () -> Unit,
+    onCancel: () -> Unit,
 ) {
     val isRecording = entry.recording
     val isCorrupted = entry.corrupted
+    val isDownloading = downloadStatus == DownloadStatus.Downloading
+    val isQueued = downloadStatus == DownloadStatus.Queued
     val containerColor = if (isRecording || isCorrupted) {
         MaterialTheme.colorScheme.errorContainer
     } else {
@@ -227,10 +233,11 @@ private fun RecordingFileItem(
                 text = when {
                     isRecording -> "录制中，结束后可查看"
                     isCorrupted -> "文件损坏，无法播放"
+                    isQueued -> "排队中 · 大小 ${formatFileSize(entry.sizeBytes)}"
                     else -> "大小 ${formatFileSize(entry.sizeBytes)}"
                 },
                 modifier = Modifier.padding(top = 3.dp),
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                color = if (isQueued) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
                 fontSize = 12.sp,
             )
             if (isDownloading) {
@@ -258,13 +265,14 @@ private fun RecordingFileItem(
         Spacer(Modifier.width(8.dp))
         PillButton(
             text = when {
-                isDownloading -> "下载中..."
+                isDownloading -> "停止"
+                isQueued -> "取消"
                 isDownloaded -> "已下载"
                 else -> "下载"
             },
             primary = false,
-            enabled = !isDownloading && !isRecording && !isCorrupted && !isDownloaded,
-            onClick = onDownload,
+            enabled = !isRecording && !isCorrupted && !isDownloaded,
+            onClick = if (isDownloading || isQueued) onCancel else onDownload,
         )
     }
 }

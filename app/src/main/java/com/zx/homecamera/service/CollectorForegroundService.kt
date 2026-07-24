@@ -369,6 +369,10 @@ class CollectorForegroundService : Service() {
     private fun startCollectorForeground(isCollecting: Boolean) {
         val notification = buildNotification(isCollecting)
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            // 必须显式传 type：若走两参 startForeground()，会继承 manifest 中声明的
+            // camera|microphone 类型，系统会据此校验 RECORD_AUDIO/CAMERA 权限——在停止、
+            // 未授权等场景下会抛 SecurityException。这里始终传由 foregroundServiceType()
+            // 计算出的类型（至少为 dataSync，永不返回 0）。
             startForeground(NOTIFICATION_ID, notification, foregroundServiceType())
         } else {
             startForeground(NOTIFICATION_ID, notification)
@@ -377,15 +381,21 @@ class CollectorForegroundService : Service() {
 
     private fun foregroundServiceType(): Int {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) return 0
-        val cameraType = ServiceInfo.FOREGROUND_SERVICE_TYPE_CAMERA
-        val microphoneType = if (ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO) ==
+        // 仅在对应权限已授予时才声明 camera/microphone 类型，避免停止等场景下权限缺失时
+        // 触发 SecurityException；二者皆未授予时退回 dataSync（HTTP/文件传输属于数据同步
+        // 语义），保证至少有一个不需要运行时权限的前台服务类型可用。
+        var type = ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC
+        if (ContextCompat.checkSelfPermission(this, Manifest.permission.CAMERA) ==
             PackageManager.PERMISSION_GRANTED
         ) {
-            ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE
-        } else {
-            0
+            type = type or ServiceInfo.FOREGROUND_SERVICE_TYPE_CAMERA
         }
-        return cameraType or microphoneType
+        if (ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO) ==
+            PackageManager.PERMISSION_GRANTED
+        ) {
+            type = type or ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE
+        }
+        return type
     }
 
     private fun buildNotification(isCollecting: Boolean): Notification {

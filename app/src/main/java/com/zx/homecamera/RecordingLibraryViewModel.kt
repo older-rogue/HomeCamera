@@ -1,12 +1,13 @@
 package com.zx.homecamera
 
 import android.app.Application
-import android.net.Uri
 import android.os.Build
 import android.provider.MediaStore
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.zx.homecamera.core.app.CollectorDevice
+import com.zx.homecamera.core.app.DownloadStatus
+import com.zx.homecamera.core.app.DownloadTaskState
 import com.zx.homecamera.core.app.RecordingLibraryState
 import com.zx.homecamera.core.app.RecordingLibraryStatus
 import com.zx.homecamera.core.protocol.RecordingEntry
@@ -15,16 +16,27 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
+import java.util.ArrayDeque
 import java.util.concurrent.Executors
+import java.util.concurrent.atomic.AtomicBoolean
 
 class RecordingLibraryViewModel(application: Application) : AndroidViewModel(application) {
     private val _state = MutableStateFlow(RecordingLibraryState())
     val state: StateFlow<RecordingLibraryState> = _state.asStateFlow()
 
     private val recordingApi = RecordingApiClient()
+    // 列表/刷新专用执行器：与下载分离，避免下载阻塞界面刷新。
     private val recordingExecutor = Executors.newSingleThreadExecutor()
+    // 下载专用执行器：单线程串行执行，保证一次只下载一个文件。
+    private val downloadExecutor = Executors.newSingleThreadExecutor()
 
     private var device: CollectorDevice? = null
+
+    // 下载队列：FIFO，受 [queueLock] 保护。同一时刻仅队首为下载中。
+    private val queueLock = Any()
+    private val downloadQueue = ArrayDeque<String>()
+    private var currentDownloadFileId: String? = null
+    private val downloadLoopActive = AtomicBoolean(false)
 
     fun setDevice(device: CollectorDevice) {
         this.device = device
@@ -71,50 +83,122 @@ class RecordingLibraryViewModel(application: Application) : AndroidViewModel(app
         }
     }
 
+    /**
+     * 下载录像文件到系统相册。同一时刻只下载一个；已在下载/排队/已下载的文件会被忽略。
+     * 多次点击不同文件会依次入队，按顺序下载。
+     */
     fun downloadRecordingToGallery(fileId: String) {
-        val device = selectedDevice() ?: return
-        val context = getApplication<Application>()
-        val entry = _state.value.files.firstOrNull { it.fileId == fileId } ?: return
-        _state.value = _state.value.copy(downloadingFileId = fileId, downloadProgress = 0f)
-        recordingExecutor.execute {
-            val result = runCatching {
-                recordingApi.downloadToGallery(
-                    context = context,
-                    device = device,
-                    entry = entry,
-                    onProgress = { transferred, total ->
-                        viewModelScope.launch {
-                            _state.value = _state.value.copy(
-                                downloadingFileId = fileId,
-                                downloadProgress = if (total > 0) (transferred.toFloat() / total).coerceIn(0f, 1f) else 0f,
-                            )
-                        }
-                    },
-                )
+        synchronized(queueLock) {
+            // 已下载或已在队列/下载中，忽略重复点击
+            if (fileId in _state.value.downloadedFileIds) return
+            if (fileId == currentDownloadFileId) return
+            if (downloadQueue.contains(fileId)) return
+            downloadQueue.add(fileId)
+        }
+        viewModelScope.launch {
+            _state.value = _state.value.copy(
+                downloads = _state.value.downloads + (fileId to DownloadTaskState(DownloadStatus.Queued, 0f)),
+            )
+        }
+        ensureDownloadLoop()
+    }
+
+    /**
+     * 取消下载：[fileId] 为当前下载时中断传输，下一个排队任务自动开始；
+     * 仍在队列中尚未开始时直接移除。对未在下载/排队的 [fileId] 安全。
+     */
+    fun cancelDownload(fileId: String) {
+        val isCurrent = synchronized(queueLock) {
+            if (fileId == currentDownloadFileId) {
+                true
+            } else {
+                downloadQueue.remove(fileId)
+                false
             }
-            val error = result.exceptionOrNull()?.message ?: if (result.getOrNull() == null) "下载失败" else null
-            viewModelScope.launch {
-                val downloaded = if (result.getOrNull() != null) {
-                    _state.value.downloadedFileIds + fileId
-                } else {
-                    _state.value.downloadedFileIds
+        }
+        if (isCurrent) {
+            // 关闭传输 socket，中断阻塞中的下载；循环捕获后自动处理下一个
+            recordingApi.cancel()
+        }
+        viewModelScope.launch {
+            _state.value = _state.value.copy(
+                downloads = _state.value.downloads - fileId,
+            )
+        }
+    }
+
+    /**
+     * 确保下载循环在 [downloadExecutor] 上运行。同一时刻只有一个循环在消费队列。
+     */
+    private fun ensureDownloadLoop() {
+        if (!downloadLoopActive.compareAndSet(false, true)) return
+        downloadExecutor.execute(::runDownloadLoop)
+    }
+
+    private fun runDownloadLoop() {
+        try {
+            while (true) {
+                val fileId = synchronized(queueLock) {
+                    currentDownloadFileId = downloadQueue.pollFirst()
+                    currentDownloadFileId
+                } ?: break // 队列空，退出循环
+
+                processDownload(fileId)
+                synchronized(queueLock) {
+                    if (currentDownloadFileId == fileId) currentDownloadFileId = null
                 }
-                _state.value = _state.value.copy(
-                    downloadingFileId = null,
-                    downloadProgress = 0f,
-                    downloadedFileIds = downloaded,
-                    errorMessage = error,
-                )
+            }
+        } finally {
+            downloadLoopActive.set(false)
+            // 在退出循环与置位之间可能有新任务入队，需重新确认
+            synchronized(queueLock) {
+                if (downloadQueue.isNotEmpty() && currentDownloadFileId == null) {
+                    ensureDownloadLoop()
+                }
             }
         }
     }
 
-    fun cancelDownload() {
-        recordingApi.cancel()
-        _state.value = _state.value.copy(
-            downloadingFileId = null,
-            downloadProgress = 0f,
-        )
+    private fun processDownload(fileId: String) {
+        val device = selectedDevice() ?: return
+        val context = getApplication<Application>()
+        val entry = _state.value.files.firstOrNull { it.fileId == fileId } ?: return
+        viewModelScope.launch {
+            _state.value = _state.value.copy(
+                downloads = _state.value.downloads + (fileId to DownloadTaskState(DownloadStatus.Downloading, 0f)),
+            )
+        }
+        val result = runCatching {
+            recordingApi.downloadToGallery(
+                context = context,
+                device = device,
+                entry = entry,
+                onProgress = { transferred, total ->
+                    val progress = if (total > 0) (transferred.toFloat() / total).coerceIn(0f, 1f) else 0f
+                    viewModelScope.launch {
+                        _state.value = _state.value.copy(
+                            downloads = _state.value.downloads + (fileId to DownloadTaskState(DownloadStatus.Downloading, progress)),
+                        )
+                    }
+                },
+            )
+        }
+        val error = result.exceptionOrNull()?.message ?: if (result.getOrNull() == null) "下载失败" else null
+        viewModelScope.launch {
+            // 被取消时 downloads 已被移除；这里仅在仍存在时清理
+            val currentDownloads = _state.value.downloads
+            if (fileId !in currentDownloads) return@launch
+            val newDownloaded = if (result.getOrNull() != null) {
+                _state.value.downloadedFileIds + fileId
+            } else {
+                _state.value.downloadedFileIds
+            }
+            _state.value = _state.value.copy(
+                downloads = currentDownloads - fileId,
+                downloadedFileIds = newDownloaded,
+                errorMessage = error,
+            )
+        }
     }
 
     /**
@@ -145,7 +229,9 @@ class RecordingLibraryViewModel(application: Application) : AndroidViewModel(app
     }
 
     override fun onCleared() {
+        recordingApi.cancel()
         recordingExecutor.shutdownNow()
+        downloadExecutor.shutdownNow()
         super.onCleared()
     }
 }
