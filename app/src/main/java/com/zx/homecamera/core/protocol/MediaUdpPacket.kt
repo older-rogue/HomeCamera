@@ -1,6 +1,5 @@
 package com.zx.homecamera.core.protocol
 
-import java.io.ByteArrayOutputStream
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
 
@@ -168,9 +167,13 @@ class MediaFrameReassembler(
     }
 
     private fun trimOldFrames() {
+        // 按序列号淘汰最旧帧，而非 linkedMapOf 的插入顺序。
+        // 乱序到达时插入序最早的可能是一个尚未收齐且序列号并非最小的帧，
+        // 按插入序删除会让真正最旧的帧永久滞留。当前 sequenceNumber 为递增 Int，
+        // 短时间内不 wraparound（30fps 下约 4 年才溢出），minByOrNull 实际安全。
         while (pending.size > maxPendingFrames) {
-            val firstKey = pending.keys.firstOrNull() ?: return
-            pending.remove(firstKey)
+            val oldestKey = pending.keys.minByOrNull { it.sequenceNumber } ?: return
+            pending.remove(oldestKey)
         }
     }
 
@@ -207,12 +210,16 @@ class MediaFrameReassembler(
         fun isComplete(): Boolean = fragments.all { it != null }
 
         fun joinPayloads(): ByteArray {
-            val output = ByteArrayOutputStream()
+            // 直接按累计字节数预分配定长数组，避免 ByteArrayOutputStream 的内部扩容拷贝
+            // 与 toByteArray() 的二次拷贝。payloadBytes 已在 accept() 中累计好。
+            val output = ByteArray(payloadBytes)
+            var offset = 0
             fragments.forEach { fragment ->
                 requireNotNull(fragment)
-                output.write(fragment)
+                System.arraycopy(fragment, 0, output, offset, fragment.size)
+                offset += fragment.size
             }
-            return output.toByteArray()
+            return output
         }
     }
 }

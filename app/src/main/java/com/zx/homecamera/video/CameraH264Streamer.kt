@@ -392,64 +392,72 @@ class CameraH264Streamer(
         var encoderLastStatsAtNanos = System.nanoTime()
         val codec = encoder ?: return
         val bufferInfo = MediaCodec.BufferInfo()
-        try {
-            while (running.get()) {
-            val dequeueStartNanos = System.nanoTime()
+        while (running.get()) {
+            // 单帧异常兜底：MediaCodec 偶发 IllegalStateException 不应致死整个 drain 线程，
+            // 否则编码器输出 buffer 不再被 dequeue，编码器 stall，表现为黑屏但服务状态仍 Running。
+            // running 期间的瞬时异常记录后 continue；真正停止时（running=false）抛出由上层处理。
+            try {
+                val dequeueStartNanos = System.nanoTime()
                 val outputIndex = codec.dequeueOutputBuffer(bufferInfo, 10_000)
                 when {
                     outputIndex >= 0 -> {
-                        val encoderOutputNanos = System.nanoTime()
-                        val encoderIntervalMs = (encoderOutputNanos - lastEncoderOutputAtNanos) / 1_000_000.0
-                        lastEncoderOutputAtNanos = encoderOutputNanos
-                        encoderFrameCount++
-                        encoderTotalBytes += bufferInfo.size
-                        val outputBuffer = codec.getOutputBuffer(outputIndex)
-                        if (outputBuffer != null && bufferInfo.size > 0) {
-                            outputBuffer.position(bufferInfo.offset)
-                            outputBuffer.limit(bufferInfo.offset + bufferInfo.size)
-                            val data = ByteArray(bufferInfo.size)
-                            outputBuffer.get(data)
+                        try {
+                            val encoderOutputNanos = System.nanoTime()
+                            val encoderIntervalMs = (encoderOutputNanos - lastEncoderOutputAtNanos) / 1_000_000.0
+                            lastEncoderOutputAtNanos = encoderOutputNanos
+                            encoderFrameCount++
+                            encoderTotalBytes += bufferInfo.size
+                            val outputBuffer = codec.getOutputBuffer(outputIndex)
+                            if (outputBuffer != null && bufferInfo.size > 0) {
+                                outputBuffer.position(bufferInfo.offset)
+                                outputBuffer.limit(bufferInfo.offset + bufferInfo.size)
+                                val data = ByteArray(bufferInfo.size)
+                                outputBuffer.get(data)
 
-                            val flags = when {
-                                bufferInfo.flags and MediaCodec.BUFFER_FLAG_CODEC_CONFIG != 0 ->
-                                    MediaUdpPacket.FLAG_CODEC_CONFIG
-                                bufferInfo.flags and MediaCodec.BUFFER_FLAG_KEY_FRAME != 0 ->
-                                    MediaUdpPacket.FLAG_KEY_FRAME
-                                else -> 0
+                                val flags = when {
+                                    bufferInfo.flags and MediaCodec.BUFFER_FLAG_CODEC_CONFIG != 0 ->
+                                        MediaUdpPacket.FLAG_CODEC_CONFIG
+                                    bufferInfo.flags and MediaCodec.BUFFER_FLAG_KEY_FRAME != 0 ->
+                                        MediaUdpPacket.FLAG_KEY_FRAME
+                                    else -> 0
+                                }
+                                if (flags and MediaUdpPacket.FLAG_CODEC_CONFIG != 0) {
+                                    latestCodecConfig = data
+                                }
+                                sendVideoFrame(data, flags, bufferInfo.presentationTimeUs)
+                                val encoderNow = System.nanoTime()
+                                if (encoderNow - encoderLastStatsAtNanos >= 2_000_000_000L) {
+                                    val elapsedSec = (encoderNow - encoderLastStatsAtNanos) / 1_000_000_000.0
+                                    val avgFps = encoderFrameCount / elapsedSec
+                                    val avgKbps = (encoderTotalBytes * 8 / 1_000) / elapsedSec
+                                    Log.i(TAG, "encoder stats: frames=${encoderFrameCount} avgFps=%.1f avgKbps=%.0f".format(avgFps, avgKbps))
+                                    encoderFrameCount = 0L
+                                    encoderTotalBytes = 0L
+                                    encoderLastStatsAtNanos = encoderNow
+                                }
+                                if (encoderIntervalMs > 100.0) {
+                                    Log.w(TAG, "encoder gap: %.0fms size=${bufferInfo.size}B flags=$flags".format(encoderIntervalMs))
+                                }
+                                recorder?.writeSample(data, flags, bufferInfo.presentationTimeUs)
+                                val recorderWriteMs = (System.nanoTime() - encoderOutputNanos) / 1_000_000.0
+                                if (recorderWriteMs > 50.0) {
+                                    Log.w(TAG, "recorder write slow: %.1fms".format(recorderWriteMs))
+                                }
                             }
-                            if (flags and MediaUdpPacket.FLAG_CODEC_CONFIG != 0) {
-                                latestCodecConfig = data
-                            }
-                            sendVideoFrame(data, flags, bufferInfo.presentationTimeUs)
-                            val encoderNow = System.nanoTime()
-                            if (encoderNow - encoderLastStatsAtNanos >= 2_000_000_000L) {
-                                val elapsedSec = (encoderNow - encoderLastStatsAtNanos) / 1_000_000_000.0
-                                val avgFps = encoderFrameCount / elapsedSec
-                                val avgKbps = (encoderTotalBytes * 8 / 1_000) / elapsedSec
-                                Log.i(TAG, "encoder stats: frames=${encoderFrameCount} avgFps=%.1f avgKbps=%.0f".format(avgFps, avgKbps))
-                                encoderFrameCount = 0L
-                                encoderTotalBytes = 0L
-                                encoderLastStatsAtNanos = encoderNow
-                            }
-                            if (encoderIntervalMs > 100.0) {
-                                Log.w(TAG, "encoder gap: %.0fms size=${bufferInfo.size}B flags=$flags".format(encoderIntervalMs))
-                            }
-                            recorder?.writeSample(data, flags, bufferInfo.presentationTimeUs)
-                            val recorderWriteMs = (System.nanoTime() - encoderOutputNanos) / 1_000_000.0
-                            if (recorderWriteMs > 50.0) {
-                                Log.w(TAG, "recorder write slow: %.1fms".format(recorderWriteMs))
-                            }
+                        } finally {
+                            // 保证输出 buffer 一定被释放，避免编码器实例因 buffer 耗尽而 stall
+                            codec.releaseOutputBuffer(outputIndex, false)
                         }
-                        codec.releaseOutputBuffer(outputIndex, false)
                     }
 
                     outputIndex == MediaCodec.INFO_OUTPUT_FORMAT_CHANGED -> {
                         recorder?.onOutputFormatChanged(codec.outputFormat)
                     }
                 }
+            } catch (error: IllegalStateException) {
+                if (!running.get()) throw error
+                Log.w(TAG, "drainEncoder transient error, continuing: ${error.message}")
             }
-        } catch (error: IllegalStateException) {
-            if (running.get()) throw error
         }
     }
 

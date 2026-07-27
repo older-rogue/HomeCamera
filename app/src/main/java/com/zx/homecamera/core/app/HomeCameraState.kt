@@ -139,6 +139,4 @@ data class RecordingPlaybackState(
     val status: RecordingPlaybackStatus = RecordingPlaybackStatus.Loading,
     val playbackUrl: String? = null,
     val errorMessage: String? = null,
-    val savedToGallery: Boolean = false,
-    val savingToGallery: Boolean = false,
 )

@@ -94,7 +94,13 @@ class CollectorActivity : ComponentActivity() {
 
             DisposableEffect(Unit) {
                 viewModel.setDisplayRotationDegrees(displayRotationDegrees())
-                onDispose {}
+                onDispose {
+                    // Activity 销毁时强制清空单例持有的 SurfaceHolder，防止
+                    // CollectorCameraRuntime（object 单例）跨 Activity 生命周期泄漏
+                    // 整个 Activity（holder 间接持有 SurfaceView -> Activity Context）。
+                    // 即使采集服务仍在后台运行，也不应保留已销毁 Activity 的 holder。
+                    CollectorCameraRuntime.setPreviewSurface(null)
+                }
             }
 
             val permissionLauncher = rememberLauncherForActivityResult(

@@ -27,7 +27,6 @@ import java.net.SocketException
 import java.net.SocketTimeoutException
 import java.nio.ByteBuffer
 import java.util.concurrent.ArrayBlockingQueue
-import java.util.concurrent.ConcurrentLinkedQueue
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
@@ -52,7 +51,7 @@ class H264UdpViewer {
             },
         )
         val audioQueue = ArrayBlockingQueue<EncodedMediaFrame>(AUDIO_QUEUE_CAPACITY)
-        val rawPacketQueue = ConcurrentLinkedQueue<ByteArray>()
+        val rawPacketQueue = ArrayBlockingQueue<ByteArray>(RAW_PACKET_QUEUE_CAPACITY)
         val udpSocket = connection.udpSocket ?: DatagramSocket(LanViewerConnector.CLIENT_UDP_PORT)
         val controlWriter = connection.controlSocket?.getOutputStream()?.bufferedWriter(Charsets.UTF_8)
         val executor = Executors.newFixedThreadPool(5)
@@ -117,14 +116,19 @@ class H264UdpViewer {
                     session.lastPacketAtMillis.set(System.currentTimeMillis())
                     // 拷贝到独立数组后立即入队，让 receive 循环尽快回到下一次 receive()。
                     val copy = packet.data.copyOf(packet.length)
-                    session.rawPacketQueue.offer(copy)
+                    // 有界队列满时 offer 立即返回 false，丢弃该包并计数，
+                    // 避免无界堆积导致 OOM。丢包会触发下游关键帧请求机制。
+                    if (!session.rawPacketQueue.offer(copy)) {
+                        session.droppedRawPackets.incrementAndGet()
+                    }
                     receivedPackets++
                     if (packetIntervalMs > 50.0) {
                         Log.w(TAG, "udp recv gap: %.0fms".format(packetIntervalMs))
                     }
                     val now = System.currentTimeMillis()
                     if (now - lastStatsLogAtMillis >= STATS_LOG_INTERVAL_MILLIS) {
-                        Log.i(TAG, "udp receiver: packets=$receivedPackets queue=${session.rawPacketQueue.size}")
+                        val dropped = session.droppedRawPackets.getAndSet(0L)
+                        Log.i(TAG, "udp receiver: packets=$receivedPackets queue=${session.rawPacketQueue.size} dropped=$dropped")
                         receivedPackets = 0L
                         lastStatsLogAtMillis = now
                     }
@@ -150,10 +154,16 @@ class H264UdpViewer {
         var incompleteFragments = 0L
         var lastStatsLogAtMillis = System.currentTimeMillis()
         while (session.running.get()) {
-            val raw = session.rawPacketQueue.poll()
+            // 用带超时的阻塞 poll 替代无界 ConcurrentLinkedQueue.poll() + Thread.sleep(1L) 空转，
+            // 既避免空转占 CPU，又能在有界队列上正常等待。
+            val raw = try {
+                session.rawPacketQueue.poll(2, TimeUnit.MILLISECONDS)
+            } catch (_: InterruptedException) {
+                // stop() 触发 shutdownNow 会中断本线程，正常退出不报错
+                Thread.currentThread().interrupt()
+                return
+            }
             if (raw == null) {
-                // 队列空时短暂休眠，避免空转占 CPU
-                Thread.sleep(1L)
                 continue
             }
             val streamPacket = MediaUdpPacket.decode(raw, raw.size) ?: continue
@@ -536,11 +546,12 @@ class H264UdpViewer {
         val controlWriter: BufferedWriter?,
         val videoQueue: RealtimeVideoFrameQueue,
         val audioQueue: ArrayBlockingQueue<EncodedMediaFrame>,
-        val rawPacketQueue: ConcurrentLinkedQueue<ByteArray>,
+        val rawPacketQueue: ArrayBlockingQueue<ByteArray>,
         val appContext: Context,
     ) {
         val running = AtomicBoolean(true)
         val lastPacketAtMillis = AtomicLong(System.currentTimeMillis())
+        val droppedRawPackets = AtomicLong(0L)
         @Volatile
         var audioEnabled = false
         @Volatile
@@ -562,6 +573,10 @@ class H264UdpViewer {
             controlSocket?.runCatching { close() }
             executor.shutdownNow()
             executor.runCatching { awaitTermination(WORKER_STOP_TIMEOUT_MILLIS, TimeUnit.MILLISECONDS) }
+            // 兜底释放音频解码器/AudioTrack。不依赖 decodeAudioFrames 的 finally，
+            // 因为 shutdownNow 后音频线程可能未在超时内进入 finally（如卡在 AudioTrack.write）。
+            // disableAudioPlayback 内部用 runCatching 包裹 stop/release，重复调用安全。
+            disableAudioPlayback(this)
             resetAudioMode()
         }
 
@@ -584,6 +599,9 @@ class H264UdpViewer {
         private const val VIDEO_QUEUE_POLL_TIMEOUT_MILLIS = 20L
         private const val AUDIO_QUEUE_POLL_TIMEOUT_MILLIS = 20L
         private const val AUDIO_QUEUE_CAPACITY = 16
+        // 原始 UDP 包队列容量上限。超出时丢弃最新入队的包（背压），
+        // 避免 reassemble 线程跟不及时导致无界堆积 OOM。256 包约可缓冲一帧 1080p 关键帧的分片。
+        private const val RAW_PACKET_QUEUE_CAPACITY = 256
         private const val WORKER_STOP_TIMEOUT_MILLIS = 500L
         private const val CONTROL_HEARTBEAT_INTERVAL_MILLIS = 5_000L
         private const val UDP_SOCKET_BUFFER_BYTES = 1_048_576

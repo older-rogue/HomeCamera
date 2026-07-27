@@ -90,11 +90,7 @@ class RecordingLibraryActivity : ComponentActivity() {
                                 fontSize = 15.sp,
                                 fontWeight = FontWeight.Medium,
                             )
-                            ScanRefreshButton(onClick = {
-                                val selectedDate = state.selectedDate
-                                if (selectedDate != null) viewModel.loadRecordingFiles(selectedDate)
-                                else viewModel.loadRecordingDates()
-                            })
+                            ScanRefreshButton(onClick = { viewModel.refresh() })
                         }
 
                         if (state.dates.isNotEmpty()) {

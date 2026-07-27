@@ -12,11 +12,13 @@ import com.zx.homecamera.core.app.ViewerStatus
 import com.zx.homecamera.network.H264UdpViewer
 import com.zx.homecamera.network.LanViewerConnector
 import com.zx.homecamera.network.ViewerConnection
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
-import java.util.concurrent.Executors
+import kotlinx.coroutines.withContext
 import java.util.concurrent.atomic.AtomicLong
 
 class ViewerViewModel(application: Application) : AndroidViewModel(application) {
@@ -27,7 +29,6 @@ class ViewerViewModel(application: Application) : AndroidViewModel(application) 
     val viewerConnectionState: StateFlow<ViewerConnection?> = _viewerConnectionState.asStateFlow()
 
     private val viewerStream = H264UdpViewer()
-    private val viewerExecutor = Executors.newSingleThreadExecutor()
     private val viewerGeneration = AtomicLong()
     private var wifiLock: WifiManager.WifiLock? = null
 
@@ -171,71 +172,64 @@ class ViewerViewModel(application: Application) : AndroidViewModel(application) 
         device: CollectorDevice,
         maxAttempts: Int = 1,
         onResult: (ViewerConnection?, String?) -> Unit,
-    ) {
-        viewerExecutor.execute {
-            var lastError: Throwable? = null
-            var connection: ViewerConnection? = null
-            repeat(maxAttempts.coerceAtLeast(1)) { attempt ->
-                if (connection == null) {
-                    val result = runCatching {
+    ) = viewModelScope.launch {
+        // 改用 viewModelScope 协程：随 ViewModel 生命周期自动取消，避免裸线程+Thread.sleep
+        // 在 onCleared 后仍阻塞（connect 卡在 socket 超时期间持有 Application 引用）。
+        // connect 是阻塞 IO，切到 Dispatchers.IO 执行。
+        var lastError: Throwable? = null
+        var connection: ViewerConnection? = null
+        repeat(maxAttempts.coerceAtLeast(1)) { attempt ->
+            if (connection == null) {
+                val result = runCatching {
+                    withContext(Dispatchers.IO) {
                         LanViewerConnector().connect(device, timeoutMillis = VIEWER_CONNECT_TIMEOUT_MILLIS)
                     }
-                    connection = result.getOrNull()
-                    lastError = result.exceptionOrNull()
-                    if (connection == null && attempt < maxAttempts - 1) {
-                        Thread.sleep(VIEWER_RECONNECT_FAST_INTERVAL_MILLIS)
-                    }
                 }
-            }
-            viewModelScope.launch {
-                onResult(connection, lastError?.message)
+                connection = result.getOrNull()
+                lastError = result.exceptionOrNull()
+                if (connection == null && attempt < maxAttempts - 1) {
+                    delay(VIEWER_RECONNECT_FAST_INTERVAL_MILLIS)
+                }
             }
         }
+        onResult(connection, lastError?.message)
     }
 
-    private fun reconnectViewerStream(generation: Long, device: CollectorDevice) {
-        viewerExecutor.execute {
-            var attempt = 0
-            var lastError: Throwable? = null
-            while (isViewerGenerationActive(generation, device)) {
-                val result = runCatching {
+    private fun reconnectViewerStream(generation: Long, device: CollectorDevice) = viewModelScope.launch {
+        // 改用协程后，重连循环不再独占单线程 executor（原实现会阻塞后续 connectViewer 请求，
+        // 导致快速切换设备时连接请求串行卡顿）。delay 取代 Thread.sleep，随 viewModelScope 取消。
+        var attempt = 0
+        var lastError: Throwable? = null
+        while (isViewerGenerationActive(generation, device)) {
+            val result = runCatching {
+                withContext(Dispatchers.IO) {
                     LanViewerConnector().connect(device, timeoutMillis = VIEWER_CONNECT_TIMEOUT_MILLIS)
                 }
-                val connection = result.getOrNull()
-                if (connection != null) {
-                    viewModelScope.launch {
-                        if (!isViewerGenerationActive(generation, device)) {
-                            connection.close()
-                            return@launch
-                        }
-                        _viewerConnectionState.value = connection
-                        startViewerStreamIfReady(generation)
-                    }
-                    return@execute
-                }
-                lastError = result.exceptionOrNull()
-                attempt++
-                val delayMillis = if (attempt < VIEWER_RECONNECT_FAST_ATTEMPTS) {
-                    VIEWER_RECONNECT_FAST_INTERVAL_MILLIS
-                } else {
-                    VIEWER_RECONNECT_SLOW_INTERVAL_MILLIS
-                }
-                try {
-                    Thread.sleep(delayMillis)
-                } catch (_: InterruptedException) {
-                    Thread.currentThread().interrupt()
-                    return@execute
-                }
             }
-            val failure = lastError?.message
-            viewModelScope.launch {
-                if (isViewerGenerationActive(generation, device)) {
-                    _state.value = _state.value.copy(
-                        status = ViewerStatus.Error,
-                        errorMessage = failure ?: "重连失败",
-                    )
+            val connection = result.getOrNull()
+            if (connection != null) {
+                if (!isViewerGenerationActive(generation, device)) {
+                    connection.close()
+                    return@launch
                 }
+                _viewerConnectionState.value = connection
+                startViewerStreamIfReady(generation)
+                return@launch
             }
+            lastError = result.exceptionOrNull()
+            attempt++
+            val delayMillis = if (attempt < VIEWER_RECONNECT_FAST_ATTEMPTS) {
+                VIEWER_RECONNECT_FAST_INTERVAL_MILLIS
+            } else {
+                VIEWER_RECONNECT_SLOW_INTERVAL_MILLIS
+            }
+            delay(delayMillis)
+        }
+        if (isViewerGenerationActive(generation, device)) {
+            _state.value = _state.value.copy(
+                status = ViewerStatus.Error,
+                errorMessage = lastError?.message ?: "重连失败",
+            )
         }
     }
 
@@ -258,7 +252,7 @@ class ViewerViewModel(application: Application) : AndroidViewModel(application) 
         viewerGeneration.incrementAndGet()
         viewerStream.stop()
         releaseWifiLock()
-        viewerExecutor.shutdownNow()
+        // viewerExecutor 已移除，重连/连接协程随 viewModelScope 自动取消
         super.onCleared()
     }
 

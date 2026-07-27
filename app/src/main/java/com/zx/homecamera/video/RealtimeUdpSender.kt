@@ -10,6 +10,7 @@ import java.net.InetAddress
 import java.util.ArrayDeque
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
+import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 
 data class OutboundMediaFrame(
@@ -80,6 +81,9 @@ class RealtimeUdpSender(
             (lock as Object).notifyAll()
         }
         executor?.shutdownNow()
+        // 与 CameraH264Streamer.stop() / AacAudioStreamer.stop() 对齐：
+        // shutdownNow 后等待线程真正退出，避免重连场景下僵尸线程累积。
+        executor?.runCatching { awaitTermination(2_000, TimeUnit.MILLISECONDS) }
         executor = null
     }
 

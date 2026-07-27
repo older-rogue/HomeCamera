@@ -20,7 +20,6 @@ import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Icon
-import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -31,7 +30,6 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.res.painterResource
-import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
@@ -90,6 +88,9 @@ class RecordingPlaybackActivity : ComponentActivity() {
                                             start()
                                         }
                                     },
+                                    // Compose 移除该 View 时停止播放并释放 MediaPlayer，
+                                    // 避免 VideoView 后台继续拉流占用采集端 http 连接与 IO 线程。
+                                    onRelease = { it.stopPlayback() },
                                 )
                             }
                         }
@@ -117,30 +118,6 @@ class RecordingPlaybackActivity : ComponentActivity() {
                         )
                         Spacer(Modifier.width(5.dp))
                         Text(text = "返回", color = Color.White, fontSize = 13.sp)
-                    }
-
-                    // 保存到相册按钮
-                    if (state.status == RecordingPlaybackStatus.Playing) {
-                        Row(
-                            modifier = Modifier
-                                .align(Alignment.BottomCenter)
-                                .padding(bottom = 32.dp)
-                                .height(42.dp)
-                                .clip(RoundedCornerShape(21.dp))
-                                .background(MaterialTheme.colorScheme.primary)
-                                .clickable(enabled = !state.savingToGallery && !state.savedToGallery) {
-                                    viewModel.savePlaybackToGallery()
-                                }
-                                .padding(horizontal = 20.dp),
-                            verticalAlignment = Alignment.CenterVertically,
-                        ) {
-                            val label = when {
-                                state.savedToGallery -> "已保存到相册"
-                                state.savingToGallery -> "保存中..."
-                                else -> "保存到相册"
-                            }
-                            Text(text = label, color = Color.White, fontSize = 14.sp, fontWeight = FontWeight.Medium)
-                        }
                     }
                 }
             }

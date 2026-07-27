@@ -11,6 +11,7 @@ import java.net.ServerSocket
 import java.net.Socket
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
+import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 
 /**
@@ -31,6 +32,7 @@ class RecordingHttpServer(
     private val running = AtomicBoolean(false)
     private var serverSocket: ServerSocket? = null
     private var executor: ExecutorService? = null
+    private var acceptThread: Thread? = null
 
     /**
      * 启动 HTTP 监听，阻塞调用者前先提交到内部线程池。
@@ -38,8 +40,10 @@ class RecordingHttpServer(
      */
     fun start() {
         if (!running.compareAndSet(false, true)) return
-        executor = Executors.newCachedThreadPool()
-        Thread(::acceptLoop, "recording-http-server").start()
+        // 改用固定大小线程池：newCachedThreadPool 无线程数上限，并发 Range 请求或异常客户端
+        // 可导致线程暴涨。8 个线程足以支撑边下边播的并发分段请求。
+        executor = Executors.newFixedThreadPool(HTTP_WORKER_THREADS)
+        acceptThread = Thread(::acceptLoop, "recording-http-server").also { it.start() }
     }
 
     /**
@@ -49,7 +53,12 @@ class RecordingHttpServer(
         running.set(false)
         serverSocket?.runCatching { close() }
         serverSocket = null
+        // 等待 accept 线程真正退出（serverSocket.close 后 accept 抛异常即退出）
+        acceptThread?.runCatching { join(500L) }
+        acceptThread = null
         executor?.runCatching { shutdownNow() }
+        // 等待工作线程退出，避免 stop 后仍残留 IO 线程占用采集端资源
+        executor?.runCatching { awaitTermination(1_000, TimeUnit.MILLISECONDS) }
         executor = null
     }
 
@@ -143,6 +152,8 @@ class RecordingHttpServer(
             val buffer = ByteArray(BUFFER_SIZE)
             var remaining = length
             while (remaining > 0L) {
+                // 停止时主动退出，避免 shutdownNow 后 IO 线程仍阻塞在 output.write
+                if (!running.get()) break
                 val toRead = minOf(buffer.size.toLong(), remaining).toInt()
                 val read = raf.read(buffer, 0, toRead)
                 if (read <= 0) break
@@ -205,5 +216,6 @@ class RecordingHttpServer(
     companion object {
         private const val BUFFER_SIZE = 64 * 1024
         private const val SOCKET_TIMEOUT_MILLIS = 30_000
+        private const val HTTP_WORKER_THREADS = 8
     }
 }

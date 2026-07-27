@@ -1,8 +1,6 @@
 package com.zx.homecamera
 
 import android.app.Application
-import android.os.Build
-import android.provider.MediaStore
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.zx.homecamera.core.app.CollectorDevice
@@ -11,6 +9,7 @@ import com.zx.homecamera.core.app.DownloadTaskState
 import com.zx.homecamera.core.app.RecordingLibraryState
 import com.zx.homecamera.core.app.RecordingLibraryStatus
 import com.zx.homecamera.core.protocol.RecordingEntry
+import com.zx.homecamera.local.GalleryDownloadStore
 import com.zx.homecamera.network.RecordingApiClient
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -32,6 +31,11 @@ class RecordingLibraryViewModel(application: Application) : AndroidViewModel(app
 
     private var device: CollectorDevice? = null
 
+    // 日期 -> 文件列表缓存。录像文件列表在采集端，每次切换日期都需网络请求 + 采集端校验，
+    // 耗时较高；切回已加载过的日期时直接用缓存秒回。仅缓存文件列表本身（不含下载状态，
+    // 下载状态每次从本地持久化重算）。刷新时清空。
+    private val dateFilesCache = java.util.Collections.synchronizedMap(HashMap<String, List<RecordingEntry>>())
+
     // 下载队列：FIFO，受 [queueLock] 保护。同一时刻仅队首为下载中。
     private val queueLock = Any()
     private val downloadQueue = ArrayDeque<String>()
@@ -47,6 +51,8 @@ class RecordingLibraryViewModel(application: Application) : AndroidViewModel(app
 
     fun loadRecordingDates() {
         val device = selectedDevice() ?: return
+        // 重新加载日期列表属于全量刷新场景，清空文件列表缓存避免显示过期数据
+        dateFilesCache.clear()
         recordingExecutor.execute {
             val result = runCatching { recordingApi.listDates(device) }
             val dates = result.getOrDefault(emptyList())
@@ -66,11 +72,21 @@ class RecordingLibraryViewModel(application: Application) : AndroidViewModel(app
 
     fun loadRecordingFiles(date: String) {
         val device = selectedDevice() ?: return
+        val startMs = System.currentTimeMillis()
         recordingExecutor.execute {
-            val result = runCatching { recordingApi.listFiles(device, date) }
-            val files = result.getOrDefault(emptyList())
-            val error = result.exceptionOrNull()?.message
+            // 命中缓存则跳过网络请求，仅重算下载状态（下载状态可能因在别处下载而变化）
+            val cached = dateFilesCache[date]
+            val (files, error, fromCache) = if (cached != null) {
+                Triple(cached, null, true)
+            } else {
+                val result = runCatching { recordingApi.listFiles(device, date) }
+                val fs = result.getOrDefault(emptyList())
+                if (result.isSuccess) dateFilesCache[date] = fs
+                Triple(fs, result.exceptionOrNull()?.message, false)
+            }
             val downloaded = queryDownloadedFileIds(files)
+            val cost = System.currentTimeMillis() - startMs
+            android.util.Log.d("RecordingLibrary", "loadRecordingFiles date=$date files=${files.size} cost=${cost}ms cache=$fromCache err=$error")
             viewModelScope.launch {
                 _state.value = _state.value.copy(
                     status = if (error != null) RecordingLibraryStatus.Error else RecordingLibraryStatus.Loaded,
@@ -81,6 +97,16 @@ class RecordingLibraryViewModel(application: Application) : AndroidViewModel(app
                 )
             }
         }
+    }
+
+    /**
+     * 强制刷新：清空日期文件列表缓存，重新请求当前选中日期（或全部日期）。
+     */
+    fun refresh() {
+        dateFilesCache.clear()
+        val selectedDate = _state.value.selectedDate
+        if (selectedDate != null) loadRecordingFiles(selectedDate)
+        else loadRecordingDates()
     }
 
     /**
@@ -189,6 +215,8 @@ class RecordingLibraryViewModel(application: Application) : AndroidViewModel(app
             val currentDownloads = _state.value.downloads
             if (fileId !in currentDownloads) return@launch
             val newDownloaded = if (result.getOrNull() != null) {
+                // 下载成功，持久化到本地，保证退出后重进仍显示「已下载」
+                GalleryDownloadStore.markDownloaded(getApplication(), fileId)
                 _state.value.downloadedFileIds + fileId
             } else {
                 _state.value.downloadedFileIds
@@ -202,29 +230,17 @@ class RecordingLibraryViewModel(application: Application) : AndroidViewModel(app
     }
 
     /**
-     * 查询系统相册（Movies/HomeCamera）中已存在的录像文件，返回已下载的 fileId 集合。
-     * displayName 规则与 [RecordingApiClient] 一一对应：HomeCamera_<fileId 中 / 替换为 _>。
+     * 查询已下载到系统相册的录像 fileId 集合。
+     * 以本地持久化记录为准（[GalleryDownloadStore]），不依赖 MediaStore 索引，
+     * 保证下载后退出再进入状态不丢失。
      */
     private fun queryDownloadedFileIds(files: List<RecordingEntry>): Set<String> {
         if (files.isEmpty()) return emptySet()
         val context = getApplication<Application>()
-        val collection = MediaStore.Video.Media.getContentUri(MediaStore.VOLUME_EXTERNAL_PRIMARY)
-        val projection = arrayOf(MediaStore.Video.Media.DISPLAY_NAME)
-        val selection = "${MediaStore.Video.Media.RELATIVE_PATH} = ?"
-        val selectionArgs = arrayOf("${android.os.Environment.DIRECTORY_MOVIES}/HomeCamera/")
-        val existing = mutableSetOf<String>()
-        context.contentResolver.query(collection, projection, selection, selectionArgs, null)?.use { cursor ->
-            val nameIndex = cursor.getColumnIndex(MediaStore.Video.Media.DISPLAY_NAME)
-            while (cursor.moveToNext()) {
-                if (nameIndex >= 0) {
-                    existing.add(cursor.getString(nameIndex))
-                }
-            }
-        }
-        if (existing.isEmpty()) return emptySet()
+        val downloaded = GalleryDownloadStore.getDownloadedFileIds(context)
+        if (downloaded.isEmpty()) return emptySet()
         return files.mapNotNull { entry ->
-            val displayName = "HomeCamera_${entry.fileId.replace('/', '_')}"
-            if (displayName in existing) entry.fileId else null
+            if (entry.fileId in downloaded) entry.fileId else null
         }.toSet()
     }
 

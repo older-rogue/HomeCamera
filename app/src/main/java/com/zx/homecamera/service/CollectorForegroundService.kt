@@ -53,7 +53,13 @@ class CollectorForegroundService : Service() {
     private var discoveryExecutor: ExecutorService? = null
     private var cameraStreamer: CameraH264Streamer? = null
     private var transferServer: RecordingTransferServer? = null
+    private var transferExecutor: ExecutorService? = null
     private var recordingHttpServer: RecordingHttpServer? = null
+    // 录像完整性校验器（带结果缓存，跨请求复用，避免每次列表请求都重新解析 mp4）
+    private val integrityChecker = RecordingIntegrityChecker()
+    // 跟踪活跃 client socket，停止时主动关闭以触发 readLine 立即抛异常退出，
+    // 避免 clientExecutor 线程等到 soTimeout(15s) 才退出。
+    private val activeClientSockets = java.util.Collections.synchronizedList(mutableListOf<Socket>())
     private var wifiLock: WifiManager.WifiLock? = null
     private var cpuWakeLock: PowerManager.WakeLock? = null
     private val recordingRoot: File
@@ -131,7 +137,10 @@ class CollectorForegroundService : Service() {
         }
         val clientPool = Executors.newFixedThreadPool(CLIENT_HANDLER_THREADS)
         clientExecutor = clientPool
-        transferServer = RecordingTransferServer(recordingRoot, clientPool)
+        // 文件传输用独立线程池，避免与控制连接（ViewStart 等）争用线程。
+        // 原实现复用 clientExecutor（4 线程），大文件传输会占满线程导致新观看连接被饿死。
+        transferExecutor = Executors.newFixedThreadPool(TRANSFER_HANDLER_THREADS)
+        transferServer = RecordingTransferServer(recordingRoot, transferExecutor!!)
         recordingHttpServer = RecordingHttpServer(recordingRoot, HTTP_PORT).also { it.start() }
         maintenanceExecutor = Executors.newSingleThreadExecutor().also { executor ->
             executor.executeCatching(::cleanRecordingsOnce)
@@ -192,14 +201,22 @@ class CollectorForegroundService : Service() {
         transferServer = null
         recordingHttpServer?.runCatching { stop() }
         recordingHttpServer = null
+        // 先关闭所有活跃 client socket，触发 handleClient/handleViewStart 中阻塞的
+        // readLine 立即抛 SocketException 退出，无需等到 soTimeout(15s)。
+        synchronized(activeClientSockets) {
+            activeClientSockets.forEach { it.runCatching { close() } }
+            activeClientSockets.clear()
+        }
         serverExecutor?.runCatching { shutdownNow() }
         clientExecutor?.runCatching { shutdownNow() }
+        transferExecutor?.runCatching { shutdownNow() }
         maintenanceExecutor?.runCatching { shutdownNow() }
         discoveryExecutor?.runCatching { shutdownNow() }
         releaseWifiLock()
         releaseCpuWakeLock()
         serverExecutor = null
         clientExecutor = null
+        transferExecutor = null
         maintenanceExecutor = null
         discoveryExecutor = null
     }
@@ -227,18 +244,23 @@ class CollectorForegroundService : Service() {
     }
 
     private fun handleClient(socket: Socket, deviceId: String, deviceName: String) {
-        socket.use { client ->
-            client.soTimeout = 10_000
-            val reader = BufferedReader(InputStreamReader(client.getInputStream(), Charsets.UTF_8))
-            val writer = client.getOutputStream().bufferedWriter(Charsets.UTF_8)
-            val firstLine = reader.readLine()
-            val message = firstLine?.let(ControlProtocol::decode)
-            when (message) {
-                is ControlMessage.ViewStart -> handleViewStart(client, reader, writer, message, deviceId, deviceName)
-                is ControlMessage.ListRecordings -> handleListRecordings(writer, message)
-                is ControlMessage.OpenRecording -> handleOpenRecording(writer, message)
-                else -> logNet("collector tcp probe remote=${client.inetAddress?.hostAddress}:${client.port} firstLine=${firstLine?.take(80)}")
+        activeClientSockets.add(socket)
+        try {
+            socket.use { client ->
+                client.soTimeout = 10_000
+                val reader = BufferedReader(InputStreamReader(client.getInputStream(), Charsets.UTF_8))
+                val writer = client.getOutputStream().bufferedWriter(Charsets.UTF_8)
+                val firstLine = reader.readLine()
+                val message = firstLine?.let(ControlProtocol::decode)
+                when (message) {
+                    is ControlMessage.ViewStart -> handleViewStart(client, reader, writer, message, deviceId, deviceName)
+                    is ControlMessage.ListRecordings -> handleListRecordings(writer, message)
+                    is ControlMessage.OpenRecording -> handleOpenRecording(writer, message)
+                    else -> logNet("collector tcp probe remote=${client.inetAddress?.hostAddress}:${client.port} firstLine=${firstLine?.take(80)}")
+                }
             }
+        } finally {
+            activeClientSockets.remove(socket)
         }
     }
 
@@ -310,16 +332,19 @@ class CollectorForegroundService : Service() {
     }
 
     private fun handleListRecordings(writer: BufferedWriter, message: ControlMessage.ListRecordings) {
+        val totalStart = System.currentTimeMillis()
         val library = RecordingLibrary(recordingRoot)
         val dates = library.listDates()
+        val scanCost = System.currentTimeMillis() - totalStart
         val recordingFileIds = cameraStreamer?.currentRecordingFileId()?.let { setOf(it) } ?: emptySet()
         val files = message.date?.let { date -> library.listFiles(date, recordingFileIds) } ?: emptyList()
-        val checker = RecordingIntegrityChecker()
+        val checkStart = System.currentTimeMillis()
         val annotatedFiles = files.map { entry ->
             // 正在录制的文件本身不可播放（未 stop），不算损坏；仅检测已关闭的文件
-            val corrupted = !entry.recording && !checker.isPlayable(File(recordingRoot, entry.fileId))
+            val corrupted = !entry.recording && !integrityChecker.isPlayable(entry.fileId, File(recordingRoot, entry.fileId))
             entry.copy(corrupted = corrupted)
         }
+        val checkCost = System.currentTimeMillis() - checkStart
         val corruptedCount = annotatedFiles.count { it.corrupted }
         writer.write(
             ControlProtocol.encode(
@@ -328,7 +353,8 @@ class CollectorForegroundService : Service() {
         )
         writer.newLine()
         writer.flush()
-        logNet("collector sent RecordingList date=${message.date} dates=${dates.size} files=${annotatedFiles.size} recording=${recordingFileIds.size} corrupted=$corruptedCount")
+        val totalCost = System.currentTimeMillis() - totalStart
+        logNet("collector sent RecordingList date=${message.date} dates=${dates.size} files=${annotatedFiles.size} recording=${recordingFileIds.size} corrupted=$corruptedCount scan=${scanCost}ms check=${checkCost}ms total=${totalCost}ms")
     }
 
     private fun handleOpenRecording(writer: BufferedWriter, message: ControlMessage.OpenRecording) {
@@ -519,5 +545,6 @@ class CollectorForegroundService : Service() {
         private const val DEFAULT_STREAM_FPS = 15
         private const val CONTROL_READ_TIMEOUT_MILLIS = 15_000
         private const val CLIENT_HANDLER_THREADS = 4
+        private const val TRANSFER_HANDLER_THREADS = 4
     }
 }
