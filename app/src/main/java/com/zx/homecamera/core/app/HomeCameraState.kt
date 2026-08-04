@@ -132,6 +132,13 @@ data class RecordingLibraryState(
     val downloads: Map<String, DownloadTaskState> = emptyMap(),
     val downloadedFileIds: Set<String> = emptySet(),
     val errorMessage: String? = null,
+    /**
+     * 首帧预览缩略图。key = fileId，value = 已解码的 Bitmap。
+     * 用 android.graphics.Bitmap 而非 Compose ImageBitmap，保持 core/app 不耦合 Compose；
+     * UI 层用 asImageBitmap() 转换。仿 [downloads] 的 map 范式，新增缩略图时整体 copy 触发重组。
+     * 仅缓存当前已加载过的 fileId；未加载或损坏/录制中（采集端返回 404）的不在此 map 中。
+     */
+    val thumbnails: Map<String, android.graphics.Bitmap> = emptyMap(),
 )
 
 data class RecordingPlaybackState(

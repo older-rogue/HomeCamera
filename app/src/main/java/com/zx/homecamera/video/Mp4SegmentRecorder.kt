@@ -19,6 +19,12 @@ class Mp4SegmentRecorder(
     ),
     private val onError: (Throwable) -> Unit = {},
     private val onSegmentStarted: () -> Unit = {},
+    /**
+     * 一个 segment 完成写入（muxer.stop 已落盘 moov）后回调，参数为该 segment 的文件。
+     * 用于异步执行 mp4 faststart 重排（moov 前移），优化 HTTP 边下边播的首次加载。
+     * 回调内应避免阻塞录制线程，需自行调度到后台线程。
+     */
+    private val onSegmentClosed: (File) -> Unit = {},
 ) {
     private var videoOutputFormat: MediaFormat? = null
     private var audioOutputFormat: MediaFormat? = null
@@ -184,6 +190,9 @@ class Mp4SegmentRecorder(
         firstVideoSampleLogged = false
         audioBaseCaptured = false
         audioSegmentBaseMicros = -1L
+        // muxer.stop 已把 moov 写到文件末尾，触发异步 faststart 重排（moov 前移），
+        // 优化后续 HTTP 边下边播的首次加载。回调内自行调度到后台线程，不阻塞录制。
+        currentSegmentFile?.let { onSegmentClosed(it) }
         currentSegmentFile = null
     }
 

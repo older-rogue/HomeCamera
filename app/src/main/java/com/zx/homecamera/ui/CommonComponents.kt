@@ -132,12 +132,13 @@ fun PillButton(
     primary: Boolean,
     enabled: Boolean = true,
     onClick: () -> Unit,
+    modifier: Modifier = Modifier,
 ) {
     val bg = if (primary) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.surface
     val content = if (primary) Color.White else MaterialTheme.colorScheme.primary
     val alpha = if (enabled) 1f else 0.4f
     Row(
-        modifier = Modifier
+        modifier = modifier
             .height(34.dp)
             .clip(RoundedCornerShape(17.dp))
             .background(bg.copy(alpha = alpha))
@@ -148,6 +149,7 @@ fun PillButton(
             .clickable(enabled = enabled, onClick = onClick)
             .padding(horizontal = 14.dp),
         verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.Center,
     ) {
         Text(
             text = text,

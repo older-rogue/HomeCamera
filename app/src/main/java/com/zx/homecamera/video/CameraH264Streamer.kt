@@ -41,6 +41,10 @@ class CameraH264Streamer(
     recordingRoot: File? = context.getExternalFilesDir(null)?.resolve("recordings"),
     private val onRecordingError: (Throwable) -> Unit = {},
     private val onSegmentStarted: () -> Unit = {},
+    /**
+     * segment 完成后回调（文件已含 moov）。用于异步 faststart 重排，优化边下边播起播速度。
+     */
+    private val onSegmentClosed: (File) -> Unit = {},
 ) {
     private val running = AtomicBoolean(false)
     private val sequenceNumber = AtomicInteger(0)
@@ -85,7 +89,12 @@ class CameraH264Streamer(
     private var activeAudioConfig: AacAudioConfig = AacAudioConfig.Default.copy(enabled = false)
     private var audioStreamer: AacAudioStreamer? = null
     private val recorder = recordingRoot?.let { root ->
-        Mp4SegmentRecorder(root, onError = onRecordingError, onSegmentStarted = onSegmentStarted)
+        Mp4SegmentRecorder(
+            root,
+            onError = onRecordingError,
+            onSegmentStarted = onSegmentStarted,
+            onSegmentClosed = onSegmentClosed,
+        )
     }
 
     fun start() {

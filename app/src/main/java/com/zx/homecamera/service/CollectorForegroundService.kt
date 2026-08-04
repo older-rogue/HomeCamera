@@ -22,9 +22,14 @@ import com.zx.homecamera.audio.AacAudioConfig
 import com.zx.homecamera.core.protocol.ControlMessage
 import com.zx.homecamera.core.protocol.ControlProtocol
 import com.zx.homecamera.core.protocol.RecordingEntry
+import com.zx.homecamera.core.storage.MediaMetadataFrameSampler
+import com.zx.homecamera.core.storage.RecordingContentAnalyzer
 import com.zx.homecamera.core.storage.RecordingIntegrityChecker
 import com.zx.homecamera.core.storage.RecordingLibrary
+import com.zx.homecamera.core.storage.RecordingMetadataStore
 import com.zx.homecamera.core.storage.RecordingStorageCleaner
+import com.zx.homecamera.core.storage.SmartCleanupCoordinator
+import com.zx.homecamera.local.SmartCleanupSettings
 import com.zx.homecamera.network.CollectorDiscoveryBroadcaster
 import com.zx.homecamera.network.logNet
 import com.zx.homecamera.network.logNetError
@@ -57,6 +62,10 @@ class CollectorForegroundService : Service() {
     private var recordingHttpServer: RecordingHttpServer? = null
     // 录像完整性校验器（带结果缓存，跨请求复用，避免每次列表请求都重新解析 mp4）
     private val integrityChecker = RecordingIntegrityChecker()
+    // 录像元数据持久化缓存（JSON）：segment 关闭时预计算完整性并写入，列表请求直接读缓存秒回。
+    // 用 lazy 延迟到首次访问（此时 Context 已 attach），避免在 <init> 阶段调用
+    // getExternalFilesDir 触发 NPE（Service 构造时 base context 尚未就绪）。
+    private val metadataStore by lazy { RecordingMetadataStore(recordingRoot) }
     // 跟踪活跃 client socket，停止时主动关闭以触发 readLine 立即抛异常退出，
     // 避免 clientExecutor 线程等到 soTimeout(15s) 才退出。
     private val activeClientSockets = java.util.Collections.synchronizedList(mutableListOf<Socket>())
@@ -111,6 +120,13 @@ class CollectorForegroundService : Service() {
                     // 的 execute{} 在 runCatching 外，shutdownNow 后提交会抛 RejectedExecutionException，
                     // 外层 runCatching 确保停止过程中触发的回调不崩溃。
                     runCatching { maintenanceExecutor?.executeCatching(::cleanRecordingsOnce) }
+                },
+                onSegmentClosed = { file ->
+                    // segment 落盘后异步校验完整性并写入元数据缓存，使列表请求无需逐文件打开
+                    // MediaMetadataRetriever。与清理任务共用 maintenanceExecutor 串行执行，不阻塞录制。
+                    runCatching {
+                        maintenanceExecutor?.executeCatching { onSegmentClosedInternal(file) }
+                    }
                 },
             )
             cameraStreamer = streamer
@@ -331,18 +347,58 @@ class CollectorForegroundService : Service() {
         }
     }
 
+    /**
+     * segment 关闭后的后台处理：完整性校验 + 元数据落盘。
+     * 在 maintenanceExecutor 上串行执行，不阻塞录制线程。任一步骤失败不影响后续步骤。
+     *
+     * 不再做 mp4 faststart 重排：迁移到 ExoPlayer + SimpleCache 后，moov-at-end 的 seek 往返
+     * 在 LAN 上仅几十毫秒，且 moov 部分会被 SimpleCache 缓存，二次播放无需再 seek。
+     * faststart 的复杂度与潜在 bug（size mismatch）不值得此微小收益。
+     */
+    private fun onSegmentClosedInternal(file: File) {
+        runCatching {
+            val library = RecordingLibrary(recordingRoot)
+            val entry = library.entryFor(file) ?: return@runCatching
+            val corrupted = !integrityChecker.isPlayable(entry.fileId, file)
+            metadataStore.put(
+                fileId = entry.fileId,
+                sizeBytes = entry.sizeBytes,
+                startMillis = entry.startMillis,
+                corrupted = corrupted,
+            )
+            logNet("segment metadata cached fileId=${entry.fileId} corrupted=$corrupted")
+        }
+    }
+
     private fun handleListRecordings(writer: BufferedWriter, message: ControlMessage.ListRecordings) {
         val totalStart = System.currentTimeMillis()
         val library = RecordingLibrary(recordingRoot)
         val dates = library.listDates()
-        val scanCost = System.currentTimeMillis() - totalStart
         val recordingFileIds = cameraStreamer?.currentRecordingFileId()?.let { setOf(it) } ?: emptySet()
+        // 元数据缓存：已关闭录像的完整性预计算结果。loadValid 会顺带剔除已删除文件的残留条目。
+        val cached = metadataStore.loadValid()
         val files = message.date?.let { date -> library.listFiles(date, recordingFileIds) } ?: emptyList()
         val checkStart = System.currentTimeMillis()
+        var cacheHits = 0
+        var cacheMisses = 0
         val annotatedFiles = files.map { entry ->
-            // 正在录制的文件本身不可播放（未 stop），不算损坏；仅检测已关闭的文件
-            val corrupted = !entry.recording && !integrityChecker.isPlayable(entry.fileId, File(recordingRoot, entry.fileId))
-            entry.copy(corrupted = corrupted)
+            if (entry.recording) {
+                // 正在录制的文件不进缓存（未 stop 缺 moov），直接标记，不校验
+                entry
+            } else {
+                val cachedEntry = cached[entry.fileId]
+                if (cachedEntry != null && cachedEntry.sizeBytes == entry.sizeBytes) {
+                    // 命中缓存：直接用预计算的 corrupted 状态，跳过 MediaMetadataRetriever
+                    cacheHits++
+                    entry.copy(corrupted = cachedEntry.corrupted)
+                } else {
+                    // 未命中（进程重启后首次访问 / 大小变化）：实时校验并回填缓存
+                    cacheMisses++
+                    val corrupted = !integrityChecker.isPlayable(entry.fileId, File(recordingRoot, entry.fileId))
+                    metadataStore.put(entry.fileId, entry.sizeBytes, entry.startMillis, corrupted)
+                    entry.copy(corrupted = corrupted)
+                }
+            }
         }
         val checkCost = System.currentTimeMillis() - checkStart
         val corruptedCount = annotatedFiles.count { it.corrupted }
@@ -354,7 +410,7 @@ class CollectorForegroundService : Service() {
         writer.newLine()
         writer.flush()
         val totalCost = System.currentTimeMillis() - totalStart
-        logNet("collector sent RecordingList date=${message.date} dates=${dates.size} files=${annotatedFiles.size} recording=${recordingFileIds.size} corrupted=$corruptedCount scan=${scanCost}ms check=${checkCost}ms total=${totalCost}ms")
+        logNet("collector sent RecordingList date=${message.date} dates=${dates.size} files=${annotatedFiles.size} recording=${recordingFileIds.size} corrupted=$corruptedCount cacheHits=$cacheHits cacheMisses=$cacheMisses check=${checkCost}ms total=${totalCost}ms")
     }
 
     private fun handleOpenRecording(writer: BufferedWriter, message: ControlMessage.OpenRecording) {
@@ -465,11 +521,55 @@ class CollectorForegroundService : Service() {
     private fun cleanRecordingsOnce() {
         val root = recordingRoot
         if (!root.exists()) root.mkdirs()
-        RecordingStorageCleaner().clean(
+        // 内容清理（优先于保留策略）：删除全黑/静止的无效片段，减少无用文件。
+        // 仅在开关开启时执行；候选过滤（保护窗/录制中/损坏）由 coordinator 负责。
+        runCatching {
+            if (SmartCleanupSettings.isEnabled(this)) {
+                val guardWindowMinutes = SmartCleanupSettings.guardWindowMinutes(this)
+                val cutoff = SmartCleanupCoordinator.guardWindowCutoff(
+                    nowMillis = System.currentTimeMillis(),
+                    guardWindowMinutes = guardWindowMinutes,
+                )
+                val excludeFileIds = cameraStreamer?.currentRecordingFileId()?.let { setOf(it) } ?: emptySet()
+                val coordinator = SmartCleanupCoordinator(
+                    library = RecordingLibrary(root),
+                    contentAnalyzer = RecordingContentAnalyzer(MediaMetadataFrameSampler()),
+                    isPlayable = integrityChecker::isPlayable,
+                    invalidate = integrityChecker::invalidate,
+                )
+                val deleted = coordinator.clean(root = root, excludeFileIds = excludeFileIds, guardWindowCutoffMillis = cutoff)
+                // 同步清除被删文件的元数据缓存，避免残留。
+                deleted.forEach { file ->
+                    val date = file.parentFile?.name ?: return@forEach
+                    metadataStore.remove("$date/${file.name}")
+                }
+                logNet("smart cleanup: deleted=${deleted.size} cutoff=$cutoff exclude=$excludeFileIds")
+            } else {
+                logNet("smart cleanup: disabled by settings")
+            }
+        }.onFailure { error ->
+            logNet("smart cleanup failed: ${error.message}")
+        }
+        // 保留策略清理：日期过期 + 空间压力删除（原有逻辑不变）。
+        val cleanResult = RecordingStorageCleaner().clean(
             root = root,
             today = LocalDate.now(),
             usableBytes = root.usableSpace,
         )
+        // 清除被删文件/目录的元数据缓存。
+        // 单文件删除：按 fileId 精确移除。
+        cleanResult.deletedFiles.forEach { file ->
+            val date = file.parentFile?.name ?: return@forEach
+            metadataStore.remove("$date/${file.name}")
+        }
+        // 目录级删除：整个日期目录过期被删，遍历目录内 mp4 逐个移除元数据。
+        // 不依赖 loadValid 兜底，确保客户端下次请求列表时缓存已是干净的。
+        cleanResult.deletedDirectories.forEach { dir ->
+            val date = dir.name
+            dir.listFiles { it.isFile && it.extension.equals("mp4", true) }?.forEach { file ->
+                metadataStore.remove("$date/${file.name}")
+            }
+        }
     }
 
     private fun sendStatusBroadcast(status: String, extraKey: String? = null, extraValue: String? = null) {

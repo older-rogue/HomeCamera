@@ -37,6 +37,16 @@ class RecordingLibrary(
             ?: emptyList()
     }
 
+    /**
+     * 为单个已关闭的录像文件构造 [RecordingFileEntry]。供 segment 关闭后写入元数据缓存用，
+     * 避免为单个文件扫描整个日期目录。[recordingFileIds] 中的文件标记 recording=true。
+     */
+    fun entryFor(file: File, recordingFileIds: Set<String> = emptySet()): RecordingFileEntry? {
+        val date = file.parentFile?.name ?: return null
+        if (!date.matches(DATE_PATTERN)) return null
+        return toEntry(date, file, recordingFileIds)
+    }
+
     private fun toEntry(date: String, file: File, recordingFileIds: Set<String>): RecordingFileEntry? {
         val startMillis = parseStartMillis(date, file.nameWithoutExtension) ?: return null
         val fileId = "$date/${file.name}"

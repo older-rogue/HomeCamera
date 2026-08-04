@@ -1,5 +1,6 @@
 package com.zx.homecamera.service
 
+import com.zx.homecamera.core.storage.ThumbnailGenerator
 import com.zx.homecamera.network.logNet
 import com.zx.homecamera.network.logNetError
 import java.io.BufferedReader
@@ -33,6 +34,12 @@ class RecordingHttpServer(
     private var serverSocket: ServerSocket? = null
     private var executor: ExecutorService? = null
     private var acceptThread: Thread? = null
+
+    /**
+     * 首帧缩略图生成器。服务器自持，[thumbnailBytes] 内部带 (fileId, size) 缓存，
+     * 无需改 [CollectorForegroundService] 接线。多个 HTTP 连接并发请求不同文件时各自生成。
+     */
+    private val thumbnailGenerator = ThumbnailGenerator()
 
     /**
      * 启动 HTTP 监听，阻塞调用者前先提交到内部线程池。
@@ -115,12 +122,23 @@ class RecordingHttpServer(
                         }
                     }
                 }
-                val file = resolveSafeFile(rawPath)
+                // 分离查询串：缩略图请求形如 /<fileId>?thumb=1，播放请求无查询串。
+                // 播放路径（无 `?`）pathPart 即 rawPath，行为与历史完全一致。
+                val questionIdx = rawPath.indexOf('?')
+                val pathPart = if (questionIdx >= 0) rawPath.substring(0, questionIdx) else rawPath
+                val queryPart = if (questionIdx >= 0) rawPath.substring(questionIdx + 1) else ""
+                val isThumb = queryPart.split("&").any { it == "thumb=1" }
+
+                val file = resolveSafeFile(pathPart)
                 if (file == null || !file.isFile) {
                     writeError(client.getOutputStream(), 404, "Not Found")
                     return
                 }
-                serveFile(client.getOutputStream(), file, rangeHeader)
+                if (isThumb) {
+                    serveThumbnail(client.getOutputStream(), pathPart, file)
+                } else {
+                    serveFile(client.getOutputStream(), file, rangeHeader)
+                }
             } catch (_: java.io.IOException) {
                 // 客户端中途断开（Broken pipe / Connection reset）是 HTTP Range 播放的正常情况：
                 // MediaPlayer 拿到所需字节后会主动关闭连接。此处静默处理，不崩溃。
@@ -161,6 +179,29 @@ class RecordingHttpServer(
                 remaining -= read
             }
         }
+        output.flush()
+    }
+
+    /**
+     * 返回 [fileId] 的首帧缩略图 JPEG。无法生成（损坏/录制中文件缺 moov）时返回 404，
+     * 由查看端显示占位。缩略图很小（数 KB），不支持 Range，直接整段写回。
+     */
+    private fun serveThumbnail(output: OutputStream, fileId: String, file: File) {
+        val jpeg = thumbnailGenerator.thumbnailBytes(fileId, file)
+        if (jpeg == null) {
+            writeError(output, 404, "Not Found")
+            return
+        }
+        val sb = StringBuilder()
+        sb.append("HTTP/1.1 200 OK\r\n")
+        sb.append("Content-Type: image/jpeg\r\n")
+        sb.append("Content-Length: ${jpeg.size}\r\n")
+        // 缩略图按 (fileId, size) 缓存且录像文件不可变，允许查看端/中间代理缓存 1 小时。
+        sb.append("Cache-Control: max-age=3600\r\n")
+        sb.append("Connection: close\r\n")
+        sb.append("\r\n")
+        output.write(sb.toString().toByteArray(Charsets.UTF_8))
+        output.write(jpeg)
         output.flush()
     }
 

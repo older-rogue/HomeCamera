@@ -61,43 +61,6 @@ class RecordingApiClient {
     }
 
     /**
-     * 下载录像文件到应用缓存目录，供 App 内播放。返回下载后的本地文件。
-     * [onProgress] 回调已传输字节数和总字节数。
-     */
-    fun downloadToCache(
-        device: CollectorDevice,
-        fileId: String,
-        cacheDir: File,
-        onProgress: (transferred: Long, total: Long) -> Unit = { _, _ -> },
-        timeoutMillis: Int = DEFAULT_TIMEOUT_MILLIS,
-    ): File? {
-        val transfer = openTransfer(device, fileId, timeoutMillis) ?: return null
-        val target = File(cacheDir, "playback_${fileId.replace('/', '_').replace(".mp4", "")}.mp4")
-        return runCatching {
-            transfer.socket.use { socket ->
-                socket.soTimeout = DEFAULT_TRANSFER_TIMEOUT_MILLIS
-                FileOutputStream(target).use { output ->
-                    val input = socket.getInputStream()
-                    val buffer = ByteArray(BUFFER_SIZE)
-                    var transferred = 0L
-                    while (true) {
-                        val read = input.read(buffer)
-                        if (read <= 0) break
-                        output.write(buffer, 0, read)
-                        transferred += read
-                        onProgress(transferred, transfer.sizeBytes)
-                    }
-                    output.flush()
-                }
-            }
-            target
-        }.onFailure {
-            Log.w(TAG, "download to cache failed fileId=$fileId", it)
-            target.delete()
-        }.getOrNull()
-    }
-
-    /**
      * 下载录像文件到系统相册（Movies/HomeCamera/）。Android 10+ 无需写存储权限。
      * 返回插入的 MediaStore Uri，失败返回 null。
      * [onProgress] 回调已传输字节数和总字节数。

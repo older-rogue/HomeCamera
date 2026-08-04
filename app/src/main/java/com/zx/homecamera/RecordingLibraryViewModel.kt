@@ -11,6 +11,8 @@ import com.zx.homecamera.core.app.RecordingLibraryStatus
 import com.zx.homecamera.core.protocol.RecordingEntry
 import com.zx.homecamera.local.GalleryDownloadStore
 import com.zx.homecamera.network.RecordingApiClient
+import com.zx.homecamera.network.ThumbnailLoader
+import android.graphics.Bitmap
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -107,6 +109,38 @@ class RecordingLibraryViewModel(application: Application) : AndroidViewModel(app
         val selectedDate = _state.value.selectedDate
         if (selectedDate != null) loadRecordingFiles(selectedDate)
         else loadRecordingDates()
+    }
+
+    /**
+     * 请求某录像的首帧缩略图。命中 [ThumbnailLoader] 内存缓存时立即更新 state；
+     * 否则异步拉取（用 ThumbnailLoader 自带执行器，不占用 [recordingExecutor]，
+     * 避免阻塞列表/刷新），回调后切回主线程写入 [RecordingLibraryState.thumbnails]。
+     *
+     * 失败（损坏/录制中/旧采集端返回 404）回调 null：这里**不写入** null，即该 fileId
+     * 不出现在 thumbnails map 中，UI 据此显示占位；避免 null 覆盖后再来请求时被短路。
+     * 单条记录在本次会话内只请求一次：inFlight 去重 + 命中即返回。
+     */
+    fun requestThumbnail(fileId: String) {
+        val device = selectedDevice() ?: return
+        // 已加载过（含 null 已失败的标记不在 map 中，会重新请求一次，但 inFlight 去重 + 缓存命中）。
+        ThumbnailLoader.get(fileId)?.let { bmp ->
+            updateThumbnail(fileId, bmp)
+            return
+        }
+        ThumbnailLoader.load(device, fileId) { bmp ->
+            if (bmp != null) {
+                viewModelScope.launch { updateThumbnail(fileId, bmp) }
+            }
+        }
+    }
+
+    /**
+     * 写入缩略图到 state。仅当 state 中尚无该 fileId 缩略图时写入，避免重复 copy。
+     */
+    private fun updateThumbnail(fileId: String, bmp: Bitmap) {
+        val current = _state.value.thumbnails
+        if (current[fileId] != null) return
+        _state.value = _state.value.copy(thumbnails = current + (fileId to bmp))
     }
 
     /**
