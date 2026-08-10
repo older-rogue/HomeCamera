@@ -43,6 +43,7 @@ class H264UdpViewer {
         surface: Surface,
         onFirstFrame: () -> Unit,
         onError: (String) -> Unit,
+        onFrameReceived: () -> Unit = {},
     ) {
         stop()
         val videoQueue = RealtimeVideoFrameQueue(
@@ -72,7 +73,7 @@ class H264UdpViewer {
             // receive 线程设为最高优先级，确保 socket.receive() 不被其他线程抢占，
             // 避免内核 socket buffer 溢出导致丢包。
             Process.setThreadPriority(Process.THREAD_PRIORITY_URGENT_AUDIO)
-            receiveFrames(session)
+            receiveFrames(session, onFrameReceived)
         }
         executor.executeCatching(session, onError) {
             reassembleFrames(session)
@@ -98,7 +99,7 @@ class H264UdpViewer {
      * 不做 decode/reassemble/offer，不持任何锁，确保 receive() 以最高频率被调用，
      * 避免内核 socket buffer 因来不及取包而溢出丢包。
      */
-    private fun receiveFrames(session: ViewerSession) {
+    private fun receiveFrames(session: ViewerSession, onFrameReceived: () -> Unit) {
         val buffer = ByteArray(MediaUdpPacket.DEFAULT_MAX_DATAGRAM_SIZE)
         var lastPacketAtNanos = System.nanoTime()
         var lastStatsLogAtMillis = System.currentTimeMillis()
@@ -114,6 +115,8 @@ class H264UdpViewer {
                     val packetIntervalMs = (packetNanos - lastPacketAtNanos) / 1_000_000.0
                     lastPacketAtNanos = packetNanos
                     session.lastPacketAtMillis.set(System.currentTimeMillis())
+                    // 每收到一个 UDP 包即通知上层刷新时间，用于在 UI 上体现数据流是否在动。
+                    onFrameReceived()
                     // 拷贝到独立数组后立即入队，让 receive 循环尽快回到下一次 receive()。
                     val copy = packet.data.copyOf(packet.length)
                     // 有界队列满时 offer 立即返回 false，丢弃该包并计数，

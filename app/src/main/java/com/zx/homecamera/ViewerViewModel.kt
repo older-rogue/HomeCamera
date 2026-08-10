@@ -19,6 +19,8 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import java.text.SimpleDateFormat
+import java.util.Locale
 import java.util.concurrent.atomic.AtomicLong
 
 class ViewerViewModel(application: Application) : AndroidViewModel(application) {
@@ -27,6 +29,17 @@ class ViewerViewModel(application: Application) : AndroidViewModel(application) 
 
     private val _viewerConnectionState = MutableStateFlow<ViewerConnection?>(null)
     val viewerConnectionState: StateFlow<ViewerConnection?> = _viewerConnectionState.asStateFlow()
+
+    /**
+     * 最近一次收到视频数据的时间文本（格式 yyyy - MM -dd HH:mm:ss）。
+     * 数据流正常时持续刷新；卡顿时停在最后一次更新时刻，便于直观判断画面是否在动。
+     */
+    private val _lastFrameTimeText = MutableStateFlow("")
+    val lastFrameTimeText: StateFlow<String> = _lastFrameTimeText.asStateFlow()
+
+    private val frameTimeFormat = SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.getDefault())
+    @Volatile
+    private var lastFrameTimeSecond = -1L
 
     private val viewerStream = H264UdpViewer()
     private val viewerGeneration = AtomicLong()
@@ -89,7 +102,7 @@ class ViewerViewModel(application: Application) : AndroidViewModel(application) 
         }
     }
 
-    private fun connectViewerStream(device: CollectorDevice, maxAttempts: Int = 1) {
+    private fun connectViewerStream(device: CollectorDevice, maxAttempts: Int = VIEWER_CONNECT_MAX_ATTEMPTS) {
         val generation = viewerGeneration.get()
         connectViewer(device, maxAttempts) { connection, message ->
             if (!isViewerGenerationActive(generation, device)) {
@@ -142,6 +155,16 @@ class ViewerViewModel(application: Application) : AndroidViewModel(application) 
                         _state.value.selectedDevice?.let { device ->
                             reconnectViewerStream(reconnectGeneration, device)
                         }
+                    }
+                },
+                onFrameReceived = {
+                    // 在 receive 线程被调用，频次高（每包一次）。按秒去重，仅跨秒时更新 StateFlow，
+                    // 避免每帧触发重组。StateFlow 值相同时不会通知订阅者，无额外开销。
+                    val nowMillis = System.currentTimeMillis()
+                    val second = nowMillis / 1_000L
+                    if (second != lastFrameTimeSecond) {
+                        lastFrameTimeSecond = second
+                        _lastFrameTimeText.value = frameTimeFormat.format(java.util.Date(nowMillis))
                     }
                 },
             )
@@ -258,6 +281,9 @@ class ViewerViewModel(application: Application) : AndroidViewModel(application) 
 
     companion object {
         private const val VIEWER_CONNECT_TIMEOUT_MILLIS = 2_500
+        // 首次连接允许重试 3 次：采集端刚启动时可能正在初始化摄像头/编码器，
+        // 第一次连接可能超时，重试给采集端几秒钟缓冲时间，避免直接 Error + finish。
+        private const val VIEWER_CONNECT_MAX_ATTEMPTS = 3
         private const val VIEWER_RECONNECT_FAST_INTERVAL_MILLIS = 1_000L
         private const val VIEWER_RECONNECT_SLOW_INTERVAL_MILLIS = 5_000L
         private const val VIEWER_RECONNECT_FAST_ATTEMPTS = 5

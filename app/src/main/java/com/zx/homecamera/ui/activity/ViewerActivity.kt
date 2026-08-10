@@ -6,6 +6,7 @@ import android.os.Bundle
 import android.view.Surface
 import android.widget.Toast
 import androidx.activity.ComponentActivity
+import androidx.activity.SystemBarStyle
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.compose.foundation.background
@@ -59,11 +60,15 @@ class ViewerActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        enableEdgeToEdge()
+        // 预览页背景为黑色，系统状态栏图标/文字使用浅色（白色），与黑底保持高对比。
+        enableEdgeToEdge(
+            statusBarStyle = SystemBarStyle.light(android.graphics.Color.TRANSPARENT, android.graphics.Color.TRANSPARENT),
+        )
         val device = CollectorDevice.fromIntent(intent)
         setContent {
             val state by viewModel.state.collectAsState()
             val viewerConnection by viewModel.viewerConnectionState.collectAsState()
+            val lastFrameTimeText by viewModel.lastFrameTimeText.collectAsState()
 
             LaunchedEffect(device) {
                 device?.let { viewModel.setDevice(it) }
@@ -80,6 +85,7 @@ class ViewerActivity : ComponentActivity() {
                 ViewerScreen(
                     state = state,
                     viewerConnection = viewerConnection,
+                    lastFrameTimeText = lastFrameTimeText,
                     onSurfaceReady = { surface -> viewModel.onViewerSurfaceReady(surface) },
                     onSurfaceDestroyed = { viewModel.onViewerSurfaceDestroyed() },
                     onBack = { finish() },
@@ -114,6 +120,7 @@ class ViewerActivity : ComponentActivity() {
 private fun ViewerScreen(
     state: com.zx.homecamera.core.app.ViewerState,
     viewerConnection: com.zx.homecamera.network.ViewerConnection?,
+    lastFrameTimeText: String,
     onSurfaceReady: (android.view.Surface) -> Unit,
     onSurfaceDestroyed: () -> Unit,
     onBack: () -> Unit,
@@ -205,7 +212,7 @@ private fun ViewerScreen(
         }
 
         // 底部状态条
-        ViewerStatusBar(status = state.status, errorMessage = state.errorMessage)
+        ViewerStatusBar(status = state.status, errorMessage = state.errorMessage, lastFrameTimeText = lastFrameTimeText)
     }
 }
 
@@ -213,6 +220,7 @@ private fun ViewerScreen(
 private fun androidx.compose.foundation.layout.BoxScope.ViewerStatusBar(
     status: ViewerStatus,
     errorMessage: String?,
+    lastFrameTimeText: String,
 ) {
     val text = when (status) {
         ViewerStatus.Playing -> "播放中"
@@ -235,5 +243,9 @@ private fun androidx.compose.foundation.layout.BoxScope.ViewerStatusBar(
         if (status == ViewerStatus.Playing) StatusDotView(StatusDot.Active) else StatusDotView(StatusDot.Gray)
         Spacer(Modifier.width(10.dp))
         Text(text = text, color = Color.White, fontSize = 13.sp)
+        if (lastFrameTimeText.isNotEmpty()) {
+            Spacer(Modifier.width(12.dp))
+            Text(text = lastFrameTimeText, color = Color.White.copy(alpha = 0.7f), fontSize = 12.sp)
+        }
     }
 }

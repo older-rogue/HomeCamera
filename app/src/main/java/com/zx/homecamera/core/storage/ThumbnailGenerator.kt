@@ -70,9 +70,8 @@ class ThumbnailGenerator {
                 "generate ${file.name}: rotation=$rotation rawFrame=${rawFrame.width}x${rawFrame.height}",
             )
             val rotated = applyRotation(rotation, rawFrame)
-            // 居中裁剪正方形 + 缩放到 THUMB_SIZE，UI 以正方形显示，只需保留中心区域。
-            // 相比保留完整帧，JPEG 体积从 ~22KB 降到 ~3-5KB，列表加载明显更快。
-            val square = centerCropSquare(rotated, THUMB_SIZE)
+            // 居中裁剪正方形，不缩放不压缩，保留原始清晰度。UI 以正方形显示，只需保留中心区域。
+            val square = centerCropSquare(rotated)
             val jpeg = ByteArrayOutputStream().use { out ->
                 square.compress(Bitmap.CompressFormat.JPEG, JPEG_QUALITY, out)
                 out.toByteArray()
@@ -111,19 +110,14 @@ class ThumbnailGenerator {
     }
 
     /**
-     * 居中裁剪正方形并缩放到 [targetSize]×[targetSize]。
+     * 居中裁剪正方形，保留原始分辨率不缩放。
      * UI 以正方形显示首帧预览，只保留画面中心区域，丢弃上下/左右边缘。
-     * 先裁后缩，避免先缩再裁的精度损失；裁剪用短边作边长，缩放用 createScaledBitmap。
      */
-    private fun centerCropSquare(frame: Bitmap, targetSize: Int): Bitmap {
+    private fun centerCropSquare(frame: Bitmap): Bitmap {
         val side = minOf(frame.width, frame.height)
         val xOffset = (frame.width - side) / 2
         val yOffset = (frame.height - side) / 2
-        val cropped = Bitmap.createBitmap(frame, xOffset, yOffset, side, side)
-        if (cropped.width == targetSize) return cropped
-        val scaled = Bitmap.createScaledBitmap(cropped, targetSize, targetSize, true)
-        if (cropped !== frame) cropped.recycle()
-        return scaled
+        return Bitmap.createBitmap(frame, xOffset, yOffset, side, side)
     }
 
     /**
@@ -145,8 +139,6 @@ class ThumbnailGenerator {
 
     companion object {
         private const val TAG = "ThumbnailGenerator"
-        // 正方形缩略图边长。两列网格每格约 500px 宽，160×160 在 ~159dp 显示下清晰且 JPEG 仅 ~3-5KB。
-        private const val THUMB_SIZE = 160
         private const val JPEG_QUALITY = 80
     }
 }

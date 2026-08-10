@@ -177,11 +177,12 @@ private fun ExoVideoPlayer(
 
     AndroidView(
         factory = { ctx ->
-            PlayerView(ctx).apply {
-                player = exoPlayer
-                useController = true
-                controllerAutoShow = true
-            }
+            val view = android.view.LayoutInflater.from(ctx)
+                .inflate(com.zx.homecamera.R.layout.player_view, null, false) as PlayerView
+            view.player = exoPlayer
+            view.useController = true
+            view.controllerAutoShow = true
+            view
         },
         modifier = Modifier.fillMaxSize(),
     )
