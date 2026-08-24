@@ -52,7 +52,13 @@ class CollectorForegroundService : Service() {
     private val lifecycle = CollectorServiceLifecycle()
     private var serverExecutor: ExecutorService? = null
     private var clientExecutor: ExecutorService? = null
+    // 保留策略清理（日期过期 + 空间压力删除）：任务轻量（纯文件扫描），高频触发
+    // （服务启动 / 每次切片 / 录像失败）。
     private var maintenanceExecutor: ExecutorService? = null
+    // 智能内容清理（抽帧分析，单轮可达小时级）：独立执行器自循环，低频触发。
+    // 与 maintenanceExecutor 分离是关键：共用单线程执行器时，耗时的内容分析会
+    // 把空间压力清理排队饿死，磁盘写满后只剩「录像写入失败」而无法自动恢复。
+    private var smartCleanupExecutor: ExecutorService? = null
     private var serverSocket: ServerSocket? = null
     private var discoveryBroadcaster: CollectorDiscoveryBroadcaster? = null
     private var discoveryExecutor: ExecutorService? = null
@@ -104,6 +110,13 @@ class CollectorForegroundService : Service() {
 
         startCollectorForeground(isCollecting = true)
         try {
+            // 清理执行器必须在 streamer 启动前就绪：streamer.start() 后第一个 segment
+            // 几乎立刻开始（首个关键帧即触发 onSegmentStarted），若此时 executor 还未
+            // 创建（旧代码在 start() 之后才创建），首个清理任务会被 ?. 静默丢弃。
+            maintenanceExecutor = Executors.newSingleThreadExecutor()
+            smartCleanupExecutor = Executors.newSingleThreadExecutor().also { executor ->
+                executor.executeCatching(::runSmartCleanupLoop)
+            }
             val streamer = CameraH264Streamer(
                 context = applicationContext,
                 recordingRoot = recordingRoot,
@@ -113,13 +126,23 @@ class CollectorForegroundService : Service() {
                         EXTRA_MESSAGE,
                         error.message ?: "录像写入失败",
                     )
+                    // 录像写入失败最常见的原因是磁盘写满（ENOSPC）。立即调度一次
+                    // 保留策略清理释放空间——它只做目录/文件扫描，秒级完成；空间释放后
+                    // 录制会在下一个关键帧自动重开 segment（MediaCodec 流未被破坏）。
+                    // 不能等下一个 2 分钟切片：那意味着丢整整一段录像。
+                    runCatching { maintenanceExecutor?.executeCatching(::cleanRetentionPolicyOnce) }
                 },
                 onSegmentStarted = {
-                    // 每次切片（约 2 分钟）触发一次异步清理，避免运行期间持续写入撑满磁盘。
-                    // maintenanceExecutor 是单线程执行器，任务自动串行；executeCatching 内部
-                    // 的 execute{} 在 runCatching 外，shutdownNow 后提交会抛 RejectedExecutionException，
-                    // 外层 runCatching 确保停止过程中触发的回调不崩溃。
-                    runCatching { maintenanceExecutor?.executeCatching(::cleanRecordingsOnce) }
+                    // 每次切片（约 2 分钟）触发一次保留策略清理（日期过期 + 空间压力
+                    // 删除），任务轻量（纯文件扫描），保证空间压力及时释放。
+                    // 耗时的智能内容分析由 smartCleanupExecutor 的独立循环低频执行，
+                    // 不在此触发——共用一个单线程执行器时分析任务会把清理排队饿死，
+                    // 磁盘写满时无法及时释放空间（历史 bug）。
+                    // maintenanceExecutor 是单线程执行器，任务自动串行；executeCatching
+                    // 内部的 execute{} 在 runCatching 外，shutdownNow 后提交会抛
+                    // RejectedExecutionException，外层 runCatching 确保停止过程中触发的
+                    // 回调不崩溃。
+                    runCatching { maintenanceExecutor?.executeCatching(::cleanRetentionPolicyOnce) }
                 },
                 onSegmentClosed = { file ->
                     // segment 落盘后异步校验完整性并写入元数据缓存，使列表请求无需逐文件打开
@@ -158,9 +181,8 @@ class CollectorForegroundService : Service() {
         transferExecutor = Executors.newFixedThreadPool(TRANSFER_HANDLER_THREADS)
         transferServer = RecordingTransferServer(recordingRoot, transferExecutor!!)
         recordingHttpServer = RecordingHttpServer(recordingRoot, HTTP_PORT).also { it.start() }
-        maintenanceExecutor = Executors.newSingleThreadExecutor().also { executor ->
-            executor.executeCatching(::cleanRecordingsOnce)
-        }
+        // 启动即执行一次保留策略清理（过期目录可能在停机期间积压）。
+        runCatching { maintenanceExecutor?.executeCatching(::cleanRetentionPolicyOnce) }
         startDiscoveryBroadcast()
     }
 
@@ -227,6 +249,8 @@ class CollectorForegroundService : Service() {
         clientExecutor?.runCatching { shutdownNow() }
         transferExecutor?.runCatching { shutdownNow() }
         maintenanceExecutor?.runCatching { shutdownNow() }
+        // shutdownNow 会中断睡眠中的清理循环线程，使其立即退出。
+        smartCleanupExecutor?.runCatching { shutdownNow() }
         discoveryExecutor?.runCatching { shutdownNow() }
         releaseWifiLock()
         releaseCpuWakeLock()
@@ -234,6 +258,7 @@ class CollectorForegroundService : Service() {
         clientExecutor = null
         transferExecutor = null
         maintenanceExecutor = null
+        smartCleanupExecutor = null
         discoveryExecutor = null
     }
 
@@ -518,43 +543,23 @@ class CollectorForegroundService : Service() {
             .build()
     }
 
-    private fun cleanRecordingsOnce() {
+    /**
+     * 保留策略清理：日期过期（默认 3 天，见 [com.zx.homecamera.core.storage.RecordingRetentionPolicy]）
+     * + 空间压力删除，并同步移除被删文件的元数据缓存。
+     * 纯目录/文件扫描，无媒体解析，秒级完成；在 maintenanceExecutor 上串行执行。
+     *
+     * 正在录制的 segment 通过 [excludeFiles] 排除：unlink 已打开的文件不会真正释放
+     * 空间（fd 被 muxer 持有到 stop），且会白白丢掉正在录制的片段。
+     */
+    private fun cleanRetentionPolicyOnce() {
         val root = recordingRoot
         if (!root.exists()) root.mkdirs()
-        // 内容清理（优先于保留策略）：删除全黑/静止的无效片段，减少无用文件。
-        // 仅在开关开启时执行；候选过滤（保护窗/录制中/损坏）由 coordinator 负责。
-        runCatching {
-            if (SmartCleanupSettings.isEnabled(this)) {
-                val guardWindowMinutes = SmartCleanupSettings.guardWindowMinutes(this)
-                val cutoff = SmartCleanupCoordinator.guardWindowCutoff(
-                    nowMillis = System.currentTimeMillis(),
-                    guardWindowMinutes = guardWindowMinutes,
-                )
-                val excludeFileIds = cameraStreamer?.currentRecordingFileId()?.let { setOf(it) } ?: emptySet()
-                val coordinator = SmartCleanupCoordinator(
-                    library = RecordingLibrary(root),
-                    contentAnalyzer = RecordingContentAnalyzer(MediaMetadataFrameSampler()),
-                    isPlayable = integrityChecker::isPlayable,
-                    invalidate = integrityChecker::invalidate,
-                )
-                val deleted = coordinator.clean(root = root, excludeFileIds = excludeFileIds, guardWindowCutoffMillis = cutoff)
-                // 同步清除被删文件的元数据缓存，避免残留。
-                deleted.forEach { file ->
-                    val date = file.parentFile?.name ?: return@forEach
-                    metadataStore.remove("$date/${file.name}")
-                }
-                logNet("smart cleanup: deleted=${deleted.size} cutoff=$cutoff exclude=$excludeFileIds")
-            } else {
-                logNet("smart cleanup: disabled by settings")
-            }
-        }.onFailure { error ->
-            logNet("smart cleanup failed: ${error.message}")
-        }
-        // 保留策略清理：日期过期 + 空间压力删除（原有逻辑不变）。
+        val excludeFiles = currentRecordingFiles()
         val cleanResult = RecordingStorageCleaner().clean(
             root = root,
             today = LocalDate.now(),
             usableBytes = root.usableSpace,
+            excludeFiles = excludeFiles,
         )
         // 清除被删文件/目录的元数据缓存。
         // 单文件删除：按 fileId 精确移除。
@@ -570,7 +575,69 @@ class CollectorForegroundService : Service() {
                 metadataStore.remove("$date/${file.name}")
             }
         }
+        if (cleanResult.deletedFiles.isNotEmpty() || cleanResult.deletedDirectories.isNotEmpty()) {
+            logNet(
+                "retention cleanup: deletedFiles=${cleanResult.deletedFiles.size} " +
+                    "deletedDirs=${cleanResult.deletedDirectories.size} excluded=${excludeFiles.size}",
+            )
+        }
     }
+
+    /**
+     * 智能内容清理循环（smartCleanupExecutor）：启动后立即执行一轮，之后每
+     * [SMART_CLEANUP_INTERVAL_MILLIS] 一轮。删除全黑/静止的无效片段，减少无用文件。
+     * 线程被中断（服务停止 shutdownNow）时退出。
+     */
+    private fun runSmartCleanupLoop() {
+        while (!Thread.currentThread().isInterrupted) {
+            runCatching { runSmartCleanupOnce() }
+                .onFailure { error -> logNet("smart cleanup failed: ${error.message}") }
+            try {
+                Thread.sleep(SMART_CLEANUP_INTERVAL_MILLIS)
+            } catch (_: InterruptedException) {
+                Thread.currentThread().interrupt()
+                return
+            }
+        }
+    }
+
+    /** 单轮智能内容清理。候选过滤（保护窗/录制中/损坏）由 coordinator 负责。 */
+    private fun runSmartCleanupOnce() {
+        if (!SmartCleanupSettings.isEnabled(this)) {
+            logNet("smart cleanup: disabled by settings")
+            return
+        }
+        val root = recordingRoot
+        val guardWindowMinutes = SmartCleanupSettings.guardWindowMinutes(this)
+        val cutoff = SmartCleanupCoordinator.guardWindowCutoff(
+            nowMillis = System.currentTimeMillis(),
+            guardWindowMinutes = guardWindowMinutes,
+        )
+        val excludeFileIds = cameraStreamer?.currentRecordingFileId()?.let { setOf(it) } ?: emptySet()
+        val coordinator = SmartCleanupCoordinator(
+            library = RecordingLibrary(root),
+            contentAnalyzer = RecordingContentAnalyzer(MediaMetadataFrameSampler()),
+            isPlayable = integrityChecker::isPlayable,
+            invalidate = integrityChecker::invalidate,
+            // 分析结果持久化到元数据缓存：录像关闭后内容不再变化，已分析的片段
+            // （无论有效与否）跳过，使每轮只抽帧分析新关闭的片段。
+            isAnalyzed = metadataStore::isAnalyzed,
+            markAnalyzed = metadataStore::markAnalyzed,
+        )
+        val deleted = coordinator.clean(root = root, excludeFileIds = excludeFileIds, guardWindowCutoffMillis = cutoff)
+        // 同步清除被删文件的元数据缓存，避免残留。
+        deleted.forEach { file ->
+            val date = file.parentFile?.name ?: return@forEach
+            metadataStore.remove("$date/${file.name}")
+        }
+        logNet("smart cleanup: deleted=${deleted.size} cutoff=$cutoff exclude=$excludeFileIds")
+    }
+
+    /** 当前正在写入的录像文件（fileId 形如 "2026-08-24/14-30-00.mp4"）。 */
+    private fun currentRecordingFiles(): Set<File> =
+        cameraStreamer?.currentRecordingFileId()
+            ?.let { setOf(File(recordingRoot, it)) }
+            ?: emptySet()
 
     private fun sendStatusBroadcast(status: String, extraKey: String? = null, extraValue: String? = null) {
         // 限定到本应用包名：Android 13+ 注册接收器时使用 RECEIVER_NOT_EXPORTED，
@@ -646,5 +713,11 @@ class CollectorForegroundService : Service() {
         private const val CONTROL_READ_TIMEOUT_MILLIS = 15_000
         private const val CLIENT_HANDLER_THREADS = 4
         private const val TRANSFER_HANDLER_THREADS = 4
+
+        /**
+         * 智能内容清理的轮询间隔。首轮在服务启动后立即执行（清历史积压），
+         * 之后每 30 分钟一轮：每轮只分析新关闭的片段（结果持久化），常态开销极小。
+         */
+        private const val SMART_CLEANUP_INTERVAL_MILLIS = 30 * 60 * 1000L
     }
 }

@@ -86,6 +86,67 @@ class RecordingRetentionPolicyTest {
         assertTrue(secondDir.resolve("01-00-00.mp4").exists())
     }
 
+    @Test
+    fun defaultRetentionKeepsOnlyThreeDays() {
+        val root = temporaryFolder.newFolder("recordings")
+        // 默认（无参构造）保留 3 天：今天 06-08 -> 保留 06-06/06-07/06-08，06-05 及更早过期
+        val expired = root.dateDirectory("2026-06-05", bytes = 12)
+        root.dateDirectory("2026-06-06", bytes = 12)
+        root.dateDirectory("2026-06-08", bytes = 12)
+
+        // keepDays 用默认值（3 天）；空间阈值显式给小值，避免默认 2GB 触发压力删除
+        val plan = RecordingRetentionPolicy(minimumFreeBytes = 100)
+            .deletionPlan(
+                root = root,
+                today = LocalDate.of(2026, 6, 8),
+                usableBytes = 500,
+            )
+
+        assertEquals(listOf(expired), plan.directories)
+        assertTrue(plan.files.isEmpty())
+    }
+
+    @Test
+    fun pressureDeletionSkipsExcludedFiles() {
+        val root = temporaryFolder.newFolder("recordings")
+        val firstDir = root.directoryWithFiles("2026-06-02", "00-00-00" to 50)
+        val activeDir = root.directoryWithFiles("2026-06-03", "00-00-00" to 50)
+        val active = activeDir.resolve("00-00-00.mp4")
+
+        // 空间不足：删最旧文件后仍不达标（10+50=60 < 100），但正在录制的文件必须跳过
+        val plan = RecordingRetentionPolicy(keepDays = 7, minimumFreeBytes = 100)
+            .deletionPlan(
+                root = root,
+                today = LocalDate.of(2026, 6, 8),
+                usableBytes = 10,
+                excludeFiles = setOf(active),
+            )
+
+        assertEquals(listOf(firstDir.resolve("00-00-00.mp4")), plan.files)
+        assertTrue(active.exists())
+    }
+
+    @Test
+    fun expiredDirectoryContainingActiveRecordingIsProtected() {
+        val root = temporaryFolder.newFolder("recordings")
+        // 06-01 已过期（keepDays=3），但目录内有正在录制的文件：目录不得整删，
+        // 其中已关闭的旧片段仍可通过空间压力删除，正在录制的文件本身不动。
+        val oldDir = root.directoryWithFiles("2026-06-01", "00-00-00" to 20, "01-00-00" to 20)
+        val active = oldDir.resolve("00-00-00.mp4")
+
+        val plan = RecordingRetentionPolicy(keepDays = 3, minimumFreeBytes = 100)
+            .deletionPlan(
+                root = root,
+                today = LocalDate.of(2026, 6, 8),
+                usableBytes = 10,
+                excludeFiles = setOf(active),
+            )
+
+        assertTrue(plan.directories.isEmpty())
+        assertEquals(listOf(oldDir.resolve("01-00-00.mp4")), plan.files)
+        assertTrue(active.exists())
+    }
+
     private fun File.dateDirectory(name: String, bytes: Int): File {
         val directory = mkdir(name)
         File(directory, "clip.mp4").writeBytes(ByteArray(bytes))

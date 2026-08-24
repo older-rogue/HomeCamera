@@ -111,7 +111,8 @@ class AacAudioStreamer(
         Log.i(
             TAG,
             "AAC audio capture started: ${config.sampleRate} Hz, ${config.channelCount} ch " +
-                "aec=${AcousticEchoCanceler.isAvailable()} ns=${NoiseSuppressor.isAvailable()}",
+                "gain=${config.pcmGain} aec=${AcousticEchoCanceler.isAvailable()} " +
+                "ns=${NoiseSuppressor.isAvailable()}",
         )
 
         val readBuffer = ByteArray(readBufferSize)
@@ -134,6 +135,9 @@ class AacAudioStreamer(
                         if (read <= 0) {
                             codec.queueInputBuffer(inputIndex, 0, 0, timestampMicros, 0)
                         } else {
+                            // 编码前软件增益：补偿 VOICE_COMMUNICATION + AEC/NS 语音处理链
+                            // 对环境音的电平衰减，录像音轨与实时流同时受益。
+                            PcmGainApplier.apply(readBuffer, read, config.pcmGain)
                             inputBuffer.put(readBuffer, 0, read)
                             codec.queueInputBuffer(inputIndex, 0, read, timestampMicros, 0)
                             submittedFrames += read / BYTES_PER_SAMPLE / config.channelCount

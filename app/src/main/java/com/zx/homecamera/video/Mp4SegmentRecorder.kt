@@ -164,14 +164,27 @@ class Mp4SegmentRecorder(
             "startSegment: videoPtsBase=$timestampMicros audioFormatPresent=${audioFormat != null} " +
                 "file=${file.name}",
         )
-        muxer = MediaMuxer(file.absolutePath, MediaMuxer.OutputFormat.MUXER_OUTPUT_MPEG_4).also { newMuxer ->
+        val newMuxer = MediaMuxer(file.absolutePath, MediaMuxer.OutputFormat.MUXER_OUTPUT_MPEG_4)
+        try {
             // setOrientationHint 必须在 addTrack/start 之前调用，写入容器旋转标记，
             // 让播放器/相册按采集端竖屏朝向显示。
             newMuxer.setOrientationHint(orientationHintDegrees)
             videoTrackIndex = newMuxer.addTrack(videoFormat)
             audioTrackIndex = if (audioFormat != null) newMuxer.addTrack(audioFormat) else -1
             newMuxer.start()
+        } catch (error: Throwable) {
+            // muxer 创建/addTrack/start 失败（典型：磁盘写满 ENOSPC）。必须释放 native
+            // muxer 并保持 muxer=null，否则 (a) muxer 的 fd 与半成品文件泄漏，且每个
+            // 关键帧重试都会再泄漏一份；(b) 残留的 trackIndex 会让后续音频写入打到
+            // 未 start 的 muxer 上持续报错。clock.onSegmentStarted 不调用，下一个
+            // 关键帧自动重试；上层 onError 回调会触发磁盘清理，空间释放后即恢复。
+            videoTrackIndex = -1
+            audioTrackIndex = -1
+            runCatching { newMuxer.release() }
+            runCatching { file.delete() }
+            throw error
         }
+        muxer = newMuxer
         currentSegmentFile = file
         videoSegmentBaseMicros = timestampMicros
         audioSegmentBaseMicros = -1L

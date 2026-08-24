@@ -60,13 +60,41 @@ class RecordingMetadataStore(
 
     /**
      * 写入或更新单个录像的元数据。segment 关闭后调用：完整性已校验，直接落盘。
+     * 若条目已存在则保留其 analyzed 标记（segment 关闭与智能清理分析并发时的竞态保护）。
      */
     fun put(fileId: String, sizeBytes: Long, startMillis: Long, corrupted: Boolean) {
         synchronized(lock) {
             val current = loadRaw()
-            current[fileId] = Entry(fileId, sizeBytes, startMillis, corrupted)
+            current[fileId] = Entry(
+                fileId = fileId,
+                sizeBytes = sizeBytes,
+                startMillis = startMillis,
+                corrupted = corrupted,
+                analyzed = current[fileId]?.analyzed ?: false,
+            )
             save(current)
         }
+    }
+
+    /**
+     * 标记指定 fileId 已完成内容分析（[com.zx.homecamera.core.storage.SmartCleanupCoordinator]）。
+     * 条目不存在时忽略（文件可能已被清理，或元数据尚未写入，下轮重新分析）。
+     */
+    fun markAnalyzed(fileId: String) {
+        synchronized(lock) {
+            val current = loadRaw()
+            val entry = current[fileId] ?: return
+            if (entry.analyzed) return
+            current[fileId] = entry.copy(analyzed = true)
+            save(current)
+        }
+    }
+
+    /**
+     * 查询指定 fileId 是否已完成内容分析。条目不存在时返回 false（下轮重新分析）。
+     */
+    fun isAnalyzed(fileId: String): Boolean = synchronized(lock) {
+        loadRaw()[fileId]?.analyzed ?: false
     }
 
     /**
@@ -120,12 +148,14 @@ class RecordingMetadataStore(
         val sizeBytes: Long,
         val startMillis: Long,
         val corrupted: Boolean,
+        val analyzed: Boolean = false,
     ) {
         fun toJson(): JSONObject = JSONObject()
             .put(KEY_FILE_ID, fileId)
             .put(KEY_SIZE, sizeBytes)
             .put(KEY_START, startMillis)
             .put(KEY_CORRUPTED, corrupted)
+            .put(KEY_ANALYZED, analyzed)
 
         companion object {
             fun fromJson(obj: JSONObject): Entry? {
@@ -134,7 +164,8 @@ class RecordingMetadataStore(
                 if (size < 0) return null
                 val start = obj.optLong(KEY_START, 0L)
                 val corrupted = obj.optBoolean(KEY_CORRUPTED, false)
-                return Entry(fileId, size, start, corrupted)
+                val analyzed = obj.optBoolean(KEY_ANALYZED, false)
+                return Entry(fileId, size, start, corrupted, analyzed)
             }
         }
     }
@@ -148,6 +179,7 @@ class RecordingMetadataStore(
         private const val KEY_SIZE = "sizeBytes"
         private const val KEY_START = "startMillis"
         private const val KEY_CORRUPTED = "corrupted"
+        private const val KEY_ANALYZED = "analyzed"
         private val lock = Any()
     }
 }
