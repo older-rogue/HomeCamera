@@ -29,6 +29,7 @@ import com.zx.homecamera.core.storage.RecordingLibrary
 import com.zx.homecamera.core.storage.RecordingMetadataStore
 import com.zx.homecamera.core.storage.RecordingStorageCleaner
 import com.zx.homecamera.core.storage.SmartCleanupCoordinator
+import com.zx.homecamera.local.CollectorAuthSettings
 import com.zx.homecamera.local.SmartCleanupSettings
 import com.zx.homecamera.network.CollectorDiscoveryBroadcaster
 import com.zx.homecamera.network.logNet
@@ -180,7 +181,12 @@ class CollectorForegroundService : Service() {
         // 原实现复用 clientExecutor（4 线程），大文件传输会占满线程导致新观看连接被饿死。
         transferExecutor = Executors.newFixedThreadPool(TRANSFER_HANDLER_THREADS)
         transferServer = RecordingTransferServer(recordingRoot, transferExecutor!!)
-        recordingHttpServer = RecordingHttpServer(recordingRoot, HTTP_PORT).also { it.start() }
+        // HTTP 播放/缩略图通道同样校验密码（请求携带 ?p=），避免绕过控制通道的鉴权。
+        recordingHttpServer = RecordingHttpServer(
+            recordingRoot = recordingRoot,
+            port = HTTP_PORT,
+            passwordVerifier = { provided -> CollectorAuthSettings.verify(this, provided) },
+        ).also { it.start() }
         // 启动即执行一次保留策略清理（过期目录可能在停机期间积压）。
         runCatching { maintenanceExecutor?.executeCatching(::cleanRetentionPolicyOnce) }
         startDiscoveryBroadcast()
@@ -188,7 +194,7 @@ class CollectorForegroundService : Service() {
 
     private fun startDiscoveryBroadcast() {
         val deviceId = Settings.Secure.getString(contentResolver, Settings.Secure.ANDROID_ID) ?: "collector"
-        val deviceName = Build.MODEL ?: "Android 采集端"
+        val deviceName = CollectorAuthSettings.deviceName(this)
         val broadcaster = CollectorDiscoveryBroadcaster(
             deviceId = deviceId,
             deviceName = deviceName,
@@ -264,7 +270,7 @@ class CollectorForegroundService : Service() {
 
     private fun runControlServer() {
         val deviceId = Settings.Secure.getString(contentResolver, Settings.Secure.ANDROID_ID) ?: "collector"
-        val deviceName = Build.MODEL ?: "Android 采集端"
+        val deviceName = CollectorAuthSettings.deviceName(this)
         try {
             ServerSocket(CONTROL_PORT).use { server ->
                 serverSocket = server
@@ -294,15 +300,39 @@ class CollectorForegroundService : Service() {
                 val firstLine = reader.readLine()
                 val message = firstLine?.let(ControlProtocol::decode)
                 when (message) {
-                    is ControlMessage.ViewStart -> handleViewStart(client, reader, writer, message, deviceId, deviceName)
-                    is ControlMessage.ListRecordings -> handleListRecordings(writer, message)
-                    is ControlMessage.OpenRecording -> handleOpenRecording(writer, message)
+                    is ControlMessage.ViewStart -> {
+                        if (!verifyClientAuth(writer, message.password)) return
+                        handleViewStart(client, reader, writer, message, deviceId, deviceName)
+                    }
+                    is ControlMessage.ListRecordings -> {
+                        if (!verifyClientAuth(writer, message.password)) return
+                        handleListRecordings(writer, message)
+                    }
+                    is ControlMessage.OpenRecording -> {
+                        if (!verifyClientAuth(writer, message.password)) return
+                        handleOpenRecording(writer, message)
+                    }
                     else -> logNet("collector tcp probe remote=${client.inetAddress?.hostAddress}:${client.port} firstLine=${firstLine?.take(80)}")
                 }
             }
         } finally {
             activeClientSockets.remove(socket)
         }
+    }
+
+    /**
+     * 校验客户端访问密码。采集端未设置密码时恒通过（兼容旧客户端与未开启鉴权场景）；
+     * 设置后不匹配则回复 [ControlMessage.AuthFailed] 并断开连接。返回 false 表示已拒绝。
+     */
+    private fun verifyClientAuth(writer: BufferedWriter, providedPassword: String): Boolean {
+        if (CollectorAuthSettings.verify(this, providedPassword)) return true
+        logNet("collector auth rejected")
+        runCatching {
+            writer.write(ControlProtocol.encode(ControlMessage.AuthFailed("密码错误")))
+            writer.newLine()
+            writer.flush()
+        }
+        return false
     }
 
     private fun handleViewStart(

@@ -25,11 +25,21 @@ sealed interface ControlMessage {
     data class ViewStart(
         val clientId: String,
         val udpPort: Int,
+        /**
+         * 采集端访问密码（可选）。未设置密码的采集端忽略该字段；设置密码的采集端
+         * 校验不通过时回复 [AuthFailed] 并断开连接。
+         */
+        val password: String = "",
     ) : ControlMessage
 
     data class Ping(val timestampMillis: Long) : ControlMessage
 
     data class Pong(val timestampMillis: Long) : ControlMessage
+
+    /**
+     * 采集端拒绝访问（密码错误）。客户端收到后应提示密码错误并清除已保存密码。
+     */
+    data class AuthFailed(val reason: String) : ControlMessage
 
     data class RequestKeyFrame(val reason: String) : ControlMessage
 
@@ -37,8 +47,9 @@ sealed interface ControlMessage {
 
     /**
      * 客户端请求录像列表。date 为空时返回所有可用日期；指定日期时返回该日期的文件列表。
+     * password 为采集端访问密码（可选），含义同 [ViewStart.password]。
      */
-    data class ListRecordings(val date: String? = null) : ControlMessage
+    data class ListRecordings(val date: String? = null, val password: String = "") : ControlMessage
 
     /**
      * 采集端返回录像列表。dates 为所有可用日期；files 为（指定日期时的）文件列表。
@@ -49,9 +60,9 @@ sealed interface ControlMessage {
     ) : ControlMessage
 
     /**
-     * 客户端请求打开某录像文件（用于播放或下载）。
+     * 客户端请求打开某录像文件（用于播放或下载）。password 为采集端访问密码（可选）。
      */
-    data class OpenRecording(val fileId: String) : ControlMessage
+    data class OpenRecording(val fileId: String, val password: String = "") : ControlMessage
 
     /**
      * 采集端为该文件开了一个独立 TCP 端口传字节流，客户端连接该端口拉取文件内容。
@@ -108,7 +119,7 @@ object ControlProtocol {
                 "type" to "VIEW_START",
                 "clientId" to message.clientId,
                 "udpPort" to message.udpPort.toString(),
-            )
+            ).let { if (message.password.isEmpty()) it else it + ("password" to message.password) }
 
             is ControlMessage.Ping -> listOf(
                 "type" to "PING",
@@ -118,6 +129,11 @@ object ControlProtocol {
             is ControlMessage.Pong -> listOf(
                 "type" to "PONG",
                 "timestampMillis" to message.timestampMillis.toString(),
+            )
+
+            is ControlMessage.AuthFailed -> listOf(
+                "type" to "AUTH_FAILED",
+                "reason" to message.reason,
             )
 
             is ControlMessage.RequestKeyFrame -> listOf(
@@ -133,6 +149,7 @@ object ControlProtocol {
             is ControlMessage.ListRecordings -> buildList {
                 add("type" to "LIST_RECORDINGS")
                 message.date?.let { add("date" to it) }
+                if (message.password.isNotEmpty()) add("password" to message.password)
             }
 
             is ControlMessage.RecordingList -> listOf(
@@ -146,7 +163,7 @@ object ControlProtocol {
             is ControlMessage.OpenRecording -> listOf(
                 "type" to "OPEN_RECORDING",
                 "fileId" to message.fileId,
-            )
+            ).let { if (message.password.isEmpty()) it else it + ("password" to message.password) }
 
             is ControlMessage.RecordingReady -> listOf(
                 "type" to "RECORDING_READY",
@@ -210,6 +227,7 @@ object ControlProtocol {
             "VIEW_START" -> ControlMessage.ViewStart(
                 clientId = fields["clientId"] ?: return null,
                 udpPort = fields["udpPort"]?.toIntOrNull() ?: return null,
+                password = fields["password"] ?: "",
             )
 
             "PING" -> ControlMessage.Ping(
@@ -218,6 +236,10 @@ object ControlProtocol {
 
             "PONG" -> ControlMessage.Pong(
                 timestampMillis = fields["timestampMillis"]?.toLongOrNull() ?: return null,
+            )
+
+            "AUTH_FAILED" -> ControlMessage.AuthFailed(
+                reason = fields["reason"] ?: "",
             )
 
             "REQUEST_KEY_FRAME" -> ControlMessage.RequestKeyFrame(
@@ -230,6 +252,7 @@ object ControlProtocol {
 
             "LIST_RECORDINGS" -> ControlMessage.ListRecordings(
                 date = fields["date"]?.takeIf { it.isNotEmpty() },
+                password = fields["password"] ?: "",
             )
 
             "RECORDING_LIST" -> ControlMessage.RecordingList(
@@ -250,6 +273,7 @@ object ControlProtocol {
 
             "OPEN_RECORDING" -> ControlMessage.OpenRecording(
                 fileId = fields["fileId"] ?: return null,
+                password = fields["password"] ?: "",
             )
 
             "RECORDING_READY" -> ControlMessage.RecordingReady(

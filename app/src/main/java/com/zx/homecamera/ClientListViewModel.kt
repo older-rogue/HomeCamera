@@ -95,13 +95,20 @@ class ClientListViewModel(application: Application) : AndroidViewModel(applicati
     }
 
     /**
-     * 广播通道增量合并发现的设备，去重后立即发布，使列表秒级刷新。
+     * 广播通道增量合并发现的设备。同一 deviceId 已存在时用广播设备替换：
+     * 广播携带用户配置的名称（权威来源），TCP 兜底扫描的名字只是"采集端 <ip>"占位，
+     * 不能让它覆盖用户设置的名称。
      */
     private fun addDevice(generation: Long, device: CollectorDevice) {
         if (scanGeneration.get() != generation) return
         val current = _state.value.devices
-        if (current.any { it.deviceId == device.deviceId }) return
-        val merged = (current + device).sortedWith(
+        val merged = if (current.any { it.deviceId == device.deviceId }) {
+            current.map { existing ->
+                if (existing.deviceId == device.deviceId) device else existing
+            }
+        } else {
+            current + device
+        }.sortedWith(
             compareByDescending<CollectorDevice> { it.online }.thenBy { it.name },
         )
         _state.value = _state.value.copy(scanStatus = ScanStatus.Finished, devices = merged)
@@ -109,14 +116,16 @@ class ClientListViewModel(application: Application) : AndroidViewModel(applicati
     }
 
     /**
-     * TCP 兜底通道一次性发布整批发现的设备。
+     * TCP 兜底通道一次性发布整批发现的设备。与广播通道已发现的设备按 deviceId 去重：
+     * 已存在（广播已提供权威名称）的设备保留原条目，仅补充广播未发现的设备。
      */
     private fun publishDevices(generation: Long, devices: List<CollectorDevice>) {
         viewModelScope.launch {
             if (scanGeneration.get() == generation) {
-                // 与广播通道已发现的设备按 deviceId 去重合并
                 val existing = _state.value.devices.associateBy { it.deviceId }
-                val merged = (existing + devices.associateBy { it.deviceId })
+                val newOnes = devices.associateBy { it.deviceId }
+                    .filterKeys { deviceId -> deviceId !in existing }
+                val merged = (existing + newOnes)
                     .values
                     .sortedWith(compareByDescending<CollectorDevice> { it.online }.thenBy { it.name })
                 _state.value = _state.value.copy(scanStatus = ScanStatus.Finished, devices = merged)

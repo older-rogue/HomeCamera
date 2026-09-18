@@ -42,9 +42,14 @@ class RecordingApiClient {
 
     /**
      * 请求录像日期列表。返回所有可用日期（降序）。
+     * [password] 为采集端访问密码；未设置密码的采集端忽略该字段。
      */
-    fun listDates(device: CollectorDevice, timeoutMillis: Int = DEFAULT_TIMEOUT_MILLIS): List<String> {
-        val response = request(device, ControlMessage.ListRecordings(date = null), timeoutMillis)
+    fun listDates(
+        device: CollectorDevice,
+        timeoutMillis: Int = DEFAULT_TIMEOUT_MILLIS,
+        password: String = "",
+    ): List<String> {
+        val response = request(device, ControlMessage.ListRecordings(date = null, password = password), timeoutMillis)
             as? ControlMessage.RecordingList
             ?: return emptyList()
         return response.dates
@@ -53,8 +58,13 @@ class RecordingApiClient {
     /**
      * 请求指定日期的录像文件列表。
      */
-    fun listFiles(device: CollectorDevice, date: String, timeoutMillis: Int = DEFAULT_TIMEOUT_MILLIS): List<RecordingEntry> {
-        val response = request(device, ControlMessage.ListRecordings(date = date), timeoutMillis)
+    fun listFiles(
+        device: CollectorDevice,
+        date: String,
+        timeoutMillis: Int = DEFAULT_TIMEOUT_MILLIS,
+        password: String = "",
+    ): List<RecordingEntry> {
+        val response = request(device, ControlMessage.ListRecordings(date = date, password = password), timeoutMillis)
             as? ControlMessage.RecordingList
             ?: return emptyList()
         return response.files
@@ -71,8 +81,9 @@ class RecordingApiClient {
         entry: RecordingEntry,
         onProgress: (transferred: Long, total: Long) -> Unit = { _, _ -> },
         timeoutMillis: Int = DEFAULT_TIMEOUT_MILLIS,
+        password: String = "",
     ): Uri? {
-        val transfer = openTransfer(device, entry.fileId, timeoutMillis) ?: return null
+        val transfer = openTransfer(device, entry.fileId, timeoutMillis, password) ?: return null
         activeTransferSocket = transfer.socket
         val displayName = galleryDisplayName(entry)
         val resolver = context.contentResolver
@@ -146,8 +157,9 @@ class RecordingApiClient {
         device: CollectorDevice,
         fileId: String,
         timeoutMillis: Int,
+        password: String = "",
     ): Transfer? {
-        val ready = request(device, ControlMessage.OpenRecording(fileId), timeoutMillis)
+        val ready = request(device, ControlMessage.OpenRecording(fileId, password), timeoutMillis)
             as? ControlMessage.RecordingReady
             ?: return null
         return runCatching {

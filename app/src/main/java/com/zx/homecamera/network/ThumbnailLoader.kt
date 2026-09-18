@@ -51,9 +51,10 @@ object ThumbnailLoader {
     /**
      * 异步加载 [fileId] 的缩略图。命中缓存时回调仍通过 executor 触发，保证调用方回调线程一致。
      * 未命中时提交 HTTP 请求；并发同 fileId 只发一次，所有回调共享结果。
+     * [password] 为采集端访问密码，拼接为 `p=` 查询参数供采集端 HTTP 服务校验。
      * [onResult] 在工作线程触发，调用方需自行切回主线程更新 UI。
      */
-    fun load(device: CollectorDevice, fileId: String, onResult: (Bitmap?) -> Unit) {
+    fun load(device: CollectorDevice, fileId: String, password: String = "", onResult: (Bitmap?) -> Unit) {
         cache.get(fileId)?.let { bmp ->
             executor.execute { onResult(bmp) }
             return
@@ -64,7 +65,7 @@ object ThumbnailLoader {
         if (callbacks.size > 1) return // 已有请求在飞，等广播即可
 
         executor.execute {
-            val result = fetch(device, fileId)
+            val result = fetch(device, fileId, password)
             if (result != null) cache.put(fileId, result)
             // 广播给所有排队回调（含本次）。取后移除 inFlight，允许后续重试/重新加载。
             val list = inFlight.remove(fileId)
@@ -78,10 +79,11 @@ object ThumbnailLoader {
         }
     }
 
-    private fun fetch(device: CollectorDevice, fileId: String): Bitmap? {
+    private fun fetch(device: CollectorDevice, fileId: String, password: String): Bitmap? {
         // fileId 形如 2026-07-21/14-30-00.mp4，直接作为 HTTP 路径（采集端按 `/` 分层解析）。
-        // 播放 URL 即用同样形式，此处保持一致。
-        val url = "http://${device.hostAddress}:$HTTP_PORT/$fileId?thumb=1"
+        // 播放 URL 即用同样形式，此处保持一致。密码 URL 编码后放入 p= 查询参数。
+        val passwordParam = if (password.isEmpty()) "" else "&p=${java.net.URLEncoder.encode(password, Charsets.UTF_8.name())}"
+        val url = "http://${device.hostAddress}:$HTTP_PORT/$fileId?thumb=1$passwordParam"
         return runCatching {
             val conn = (URL(url).openConnection() as HttpURLConnection).apply {
                 connectTimeout = CONNECT_TIMEOUT_MILLIS

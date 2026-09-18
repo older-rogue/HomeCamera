@@ -24,11 +24,14 @@ import java.util.concurrent.atomic.AtomicBoolean
  * 请求格式：`GET /<fileId> HTTP/1.1`，fileId 形如 `2026-07-23/14-30-00.mp4`。
  * 响应：支持 `Range: bytes=start-end`，返回 `206 Partial Content` 或 `200 OK`。
  *
+ * 采集端开启密码后，请求需携带 `p=<password>` 查询参数（URL 编码），否则返回 403。
+ *
  * 路径穿越校验复用 [RecordingTransferServer] 的安全逻辑，确保文件在 [recordingRoot] 内。
  */
 class RecordingHttpServer(
     private val recordingRoot: File,
     private val port: Int,
+    private val passwordVerifier: (String) -> Boolean = { true },
 ) {
     private val running = AtomicBoolean(false)
     private var serverSocket: ServerSocket? = null
@@ -127,7 +130,15 @@ class RecordingHttpServer(
                 val questionIdx = rawPath.indexOf('?')
                 val pathPart = if (questionIdx >= 0) rawPath.substring(0, questionIdx) else rawPath
                 val queryPart = if (questionIdx >= 0) rawPath.substring(questionIdx + 1) else ""
-                val isThumb = queryPart.split("&").any { it == "thumb=1" }
+                val queryParams = queryPart.split("&").filter { it.isNotEmpty() }
+                val isThumb = queryParams.any { it == "thumb=1" }
+                // 密码走查询参数 p=；未开启密码时 passwordVerifier 恒为真，直接放行。
+                val providedPassword = queryParams.firstOrNull { it.startsWith("p=") }
+                    ?.removePrefix("p=")?.urlDecode() ?: ""
+                if (!passwordVerifier(providedPassword)) {
+                    writeError(client.getOutputStream(), 403, "Forbidden")
+                    return
+                }
 
                 val file = resolveSafeFile(pathPart)
                 if (file == null || !file.isFile) {
@@ -260,3 +271,7 @@ class RecordingHttpServer(
         private const val HTTP_WORKER_THREADS = 8
     }
 }
+
+/** 解码查询参数中的 URL 编码内容（密码可能含 & = % 等字符）。 */
+private fun String.urlDecode(): String =
+    java.net.URLDecoder.decode(this, Charsets.UTF_8.name())

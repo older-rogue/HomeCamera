@@ -5,6 +5,7 @@ import androidx.lifecycle.AndroidViewModel
 import com.zx.homecamera.core.app.CollectorDevice
 import com.zx.homecamera.core.app.RecordingPlaybackState
 import com.zx.homecamera.core.app.RecordingPlaybackStatus
+import com.zx.homecamera.local.ClientSavedPasswords
 import com.zx.homecamera.service.CollectorForegroundService
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -18,7 +19,10 @@ class RecordingPlaybackViewModel(application: Application) : AndroidViewModel(ap
         // 直接用采集端 HTTP URL 播放。ExoPlayer 边下边播 + 500ms 起播缓冲，LAN 下近乎即时出画面。
         // 磁盘缓存由 ExoPlayer 的 SimpleCache（VideoCacheManager）透明处理：二次观看/拖拽已缓存区域秒开，
         // 无需此前 downloadToCache 整文件下载方案。
-        val url = "http://${device.hostAddress}:${CollectorForegroundService.HTTP_PORT}/$fileId"
+        // 密码拼接为 p= 查询参数（URL 编码），供采集端 HTTP 服务鉴权。
+        val password = ClientSavedPasswords.getPassword(getApplication(), device.deviceId).orEmpty()
+        val passwordParam = if (password.isEmpty()) "" else "?p=${java.net.URLEncoder.encode(password, Charsets.UTF_8.name())}"
+        val url = "http://${device.hostAddress}:${CollectorForegroundService.HTTP_PORT}/$fileId$passwordParam"
         _state.value = _state.value.copy(
             fileId = fileId,
             playbackUrl = url,

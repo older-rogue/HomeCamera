@@ -10,6 +10,7 @@ import com.zx.homecamera.core.app.RecordingLibraryState
 import com.zx.homecamera.core.app.RecordingLibraryStatus
 import com.zx.homecamera.core.protocol.RecordingEntry
 import com.zx.homecamera.local.GalleryDownloadStore
+import com.zx.homecamera.local.ClientSavedPasswords
 import com.zx.homecamera.network.RecordingApiClient
 import com.zx.homecamera.network.ThumbnailLoader
 import android.graphics.Bitmap
@@ -51,12 +52,17 @@ class RecordingLibraryViewModel(application: Application) : AndroidViewModel(app
 
     private fun selectedDevice(): CollectorDevice? = device
 
+    /** 该采集端已保存的访问密码（观看页验证通过后写入）。 */
+    private fun devicePassword(): String =
+        device?.let { ClientSavedPasswords.getPassword(getApplication(), it.deviceId) } ?: ""
+
     fun loadRecordingDates() {
         val device = selectedDevice() ?: return
         // 重新加载日期列表属于全量刷新场景，清空文件列表缓存避免显示过期数据
         dateFilesCache.clear()
         recordingExecutor.execute {
-            val result = runCatching { recordingApi.listDates(device) }
+            val password = devicePassword()
+            val result = runCatching { recordingApi.listDates(device, password = password) }
             val dates = result.getOrDefault(emptyList())
             val error = result.exceptionOrNull()?.message
             viewModelScope.launch {
@@ -81,7 +87,8 @@ class RecordingLibraryViewModel(application: Application) : AndroidViewModel(app
             val (files, error, fromCache) = if (cached != null) {
                 Triple(cached, null, true)
             } else {
-                val result = runCatching { recordingApi.listFiles(device, date) }
+                val password = devicePassword()
+                val result = runCatching { recordingApi.listFiles(device, date, password = password) }
                 val fs = result.getOrDefault(emptyList())
                 if (result.isSuccess) dateFilesCache[date] = fs
                 Triple(fs, result.exceptionOrNull()?.message, false)
@@ -127,7 +134,7 @@ class RecordingLibraryViewModel(application: Application) : AndroidViewModel(app
             updateThumbnail(fileId, bmp)
             return
         }
-        ThumbnailLoader.load(device, fileId) { bmp ->
+        ThumbnailLoader.load(device, fileId, devicePassword()) { bmp ->
             if (bmp != null) {
                 viewModelScope.launch { updateThumbnail(fileId, bmp) }
             }
@@ -233,6 +240,7 @@ class RecordingLibraryViewModel(application: Application) : AndroidViewModel(app
                 context = context,
                 device = device,
                 entry = entry,
+                password = devicePassword(),
                 onProgress = { transferred, total ->
                     val progress = if (total > 0) (transferred.toFloat() / total).coerceIn(0f, 1f) else 0f
                     viewModelScope.launch {

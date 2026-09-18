@@ -106,6 +106,11 @@ class CameraH264Streamer(
 
         activeAudioConfig = AacAudioConfig.Default.copy(enabled = false)
         latestAudioCodecConfig = null
+        // 必须在编码器产出任何关键帧之前声明音频预期，否则首个关键帧会抢先以
+        // 纯视频方式开启 segment，音频格式到达时首段被截成微小文件（187K 问题）。
+        val micGranted = ContextCompat.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO) ==
+            PackageManager.PERMISSION_GRANTED
+        recorder?.setAudioExpected(micGranted)
         cameraThread = HandlerThread("camera-h264-streamer").also { thread ->
             thread.start()
             cameraHandler = Handler(thread.looper)
@@ -502,6 +507,8 @@ class CameraH264Streamer(
                     latestAudioCodecConfig = null
                     activeAudioConfig = streamer.config.copy(enabled = false)
                     audioStreamer = null
+                    // 音频失败后不再等待：后续首个 segment 按纯视频开启。
+                    recorder?.setAudioExpected(false)
                 },
             )
         }.onSuccess {

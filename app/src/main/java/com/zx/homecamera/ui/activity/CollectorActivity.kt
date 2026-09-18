@@ -28,10 +28,14 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.Button
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
@@ -46,6 +50,8 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.painterResource
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
@@ -55,6 +61,7 @@ import com.zx.homecamera.CollectorViewModel
 import com.zx.homecamera.R
 import com.zx.homecamera.core.app.RecordingStatus
 import com.zx.homecamera.core.app.ServiceStatus
+import com.zx.homecamera.local.CollectorAuthSettings
 import com.zx.homecamera.ui.AppTopBar
 import com.zx.homecamera.ui.CenterCropSurfaceLayout
 import com.zx.homecamera.ui.StatusDot
@@ -77,6 +84,12 @@ class CollectorActivity : ComponentActivity() {
             val state by viewModel.state.collectAsState()
             val context = LocalContext.current
             var collectorPreviewSize by remember { mutableStateOf(defaultCollectorPreviewSize()) }
+            // 名称与密码设置弹窗状态
+            var showAuthConfigDialog by remember { mutableStateOf(false) }
+            var authName by remember { mutableStateOf("") }
+            var authPassword by remember { mutableStateOf("") }
+            var authConfirm by remember { mutableStateOf("") }
+            var authError by remember { mutableStateOf<String?>(null) }
 
             fun displayRotationDegrees(): Int =
                 CameraH264Streamer.rotationDegrees(display?.rotation ?: Surface.ROTATION_0)
@@ -129,15 +142,47 @@ class CollectorActivity : ComponentActivity() {
                 }
             }
 
-            // 进入采集端即申请权限并启动服务，与重构前“选择采集端即启动”的行为一致。
-            LaunchedEffect(Unit) {
+            fun openAuthConfigDialog() {
+                authName = CollectorAuthSettings.deviceName(context)
+                authPassword = ""
+                authConfirm = ""
+                authError = null
+                showAuthConfigDialog = true
+            }
+
+            fun saveAuthConfigAndStart() {
+                val name = authName.trim()
+                val error = when {
+                    name.isEmpty() -> "请输入设备名称"
+                    authPassword.isEmpty() -> "请输入访问密码"
+                    authPassword != authConfirm -> "两次输入的密码不一致"
+                    else -> null
+                }
+                authError = error
+                if (error != null) return
+                CollectorAuthSettings.save(context, name, authPassword)
+                showAuthConfigDialog = false
+                // 运行中修改配置：重启服务，使新名称/密码立即生效。
+                if (state.serviceStatus == ServiceStatus.Running) {
+                    viewModel.stopCollectorService()
+                }
                 ensureCollectorPermissionsAndStart()
+            }
+
+            // 首次进入需先设置名称与密码；已配置则直接申请权限并启动服务。
+            LaunchedEffect(Unit) {
+                if (CollectorAuthSettings.isConfigured(context)) {
+                    ensureCollectorPermissionsAndStart()
+                } else {
+                    openAuthConfigDialog()
+                }
             }
 
             HomeCameraTheme {
                 CollectorScreen(
                     state = state,
                     previewDisplaySize = collectorPreviewSize.displaySize,
+                    deviceName = CollectorAuthSettings.deviceName(context),
                     onSurfaceReady = { holder, width, height ->
                         CollectorCameraRuntime.setPreviewSurface(holder, width, height)
                     },
@@ -147,12 +192,34 @@ class CollectorActivity : ComponentActivity() {
                     onPreviewSizeChanged = { listener ->
                         CollectorCameraRuntime.setPreviewDisplaySizeListener(listener)
                     },
-                    onStartCollector = { ensureCollectorPermissionsAndStart() },
+                    onStartCollector = {
+                        // 未设置名称/密码时先弹设置，配置完成再启动。
+                        if (CollectorAuthSettings.isConfigured(context)) {
+                            ensureCollectorPermissionsAndStart()
+                        } else {
+                            openAuthConfigDialog()
+                        }
+                    },
+                    onEditAuthConfig = { openAuthConfigDialog() },
                     onBack = {
                         viewModel.stopCollectorService()
                         finish()
                     },
                 )
+
+                if (showAuthConfigDialog) {
+                    CollectorAuthDialog(
+                        name = authName,
+                        password = authPassword,
+                        confirm = authConfirm,
+                        error = authError,
+                        onNameChange = { authName = it },
+                        onPasswordChange = { authPassword = it },
+                        onConfirmChange = { authConfirm = it },
+                        onConfirm = { saveAuthConfigAndStart() },
+                        onDismiss = { showAuthConfigDialog = false },
+                    )
+                }
             }
         }
     }
@@ -199,10 +266,12 @@ class CollectorActivity : ComponentActivity() {
 private fun CollectorScreen(
     state: com.zx.homecamera.core.app.CollectorState,
     previewDisplaySize: VideoSize,
+    deviceName: String,
     onSurfaceReady: (android.view.SurfaceHolder, Int, Int) -> Unit,
     onSurfaceDestroyed: () -> Unit,
     onPreviewSizeChanged: (((VideoSize) -> Unit)?) -> Unit,
     onStartCollector: () -> Unit,
+    onEditAuthConfig: () -> Unit,
     onBack: () -> Unit,
 ) {
     Column(modifier = Modifier.fillMaxSize().statusBarsPadding()) {
@@ -302,8 +371,105 @@ private fun CollectorScreen(
                     }
                 }
             }
+
+            Surface(
+                modifier = Modifier.fillMaxWidth(),
+                shape = RoundedCornerShape(12.dp),
+                color = MaterialTheme.colorScheme.surface,
+                shadowElevation = 1.dp,
+            ) {
+                Row(
+                    modifier = Modifier.padding(horizontal = 14.dp, vertical = 12.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text(
+                            text = "名称与密码",
+                            color = MaterialTheme.colorScheme.onSurface,
+                            fontSize = 14.sp,
+                            fontWeight = FontWeight.Medium,
+                        )
+                        Text(
+                            text = deviceName,
+                            modifier = Modifier.padding(top = 2.dp),
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            fontSize = 12.sp,
+                        )
+                    }
+                    TextButton(onClick = onEditAuthConfig) {
+                        Text("编辑")
+                    }
+                }
+            }
         }
     }
+}
+
+@Composable
+private fun CollectorAuthDialog(
+    name: String,
+    password: String,
+    confirm: String,
+    error: String?,
+    onNameChange: (String) -> Unit,
+    onPasswordChange: (String) -> Unit,
+    onConfirmChange: (String) -> Unit,
+    onConfirm: () -> Unit,
+    onDismiss: () -> Unit,
+) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text(text = "设置名称与访问密码") },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                Text(
+                    text = "其他设备连接本采集端需凭此密码，请妥善保管。",
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    fontSize = 13.sp,
+                )
+                OutlinedTextField(
+                    value = name,
+                    onValueChange = onNameChange,
+                    label = { Text("设备名称") },
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth(),
+                )
+                OutlinedTextField(
+                    value = password,
+                    onValueChange = onPasswordChange,
+                    label = { Text("访问密码") },
+                    singleLine = true,
+                    visualTransformation = PasswordVisualTransformation(),
+                    modifier = Modifier.fillMaxWidth(),
+                )
+                OutlinedTextField(
+                    value = confirm,
+                    onValueChange = onConfirmChange,
+                    label = { Text("确认密码") },
+                    singleLine = true,
+                    visualTransformation = PasswordVisualTransformation(),
+                    modifier = Modifier.fillMaxWidth(),
+                )
+                error?.let {
+                    Text(
+                        text = it,
+                        color = MaterialTheme.colorScheme.error,
+                        fontSize = 13.sp,
+                    )
+                }
+            }
+        },
+        confirmButton = {
+            Button(onClick = onConfirm) {
+                Text("保存并启动")
+            }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) {
+                Text("取消")
+            }
+        },
+    )
 }
 
 private fun ServiceStatus.label(): String = when (this) {

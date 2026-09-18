@@ -9,6 +9,8 @@ import androidx.lifecycle.viewModelScope
 import com.zx.homecamera.core.app.CollectorDevice
 import com.zx.homecamera.core.app.ViewerState
 import com.zx.homecamera.core.app.ViewerStatus
+import com.zx.homecamera.local.ClientSavedPasswords
+import com.zx.homecamera.network.AuthFailedException
 import com.zx.homecamera.network.H264UdpViewer
 import com.zx.homecamera.network.LanViewerConnector
 import com.zx.homecamera.network.ViewerConnection
@@ -50,9 +52,12 @@ class ViewerViewModel(application: Application) : AndroidViewModel(application) 
     private var viewerStreamKey: String? = null
     @Volatile
     private var paused = false
+    // 访问采集端的密码（由 setDevice 传入，重连沿用；验证成功才持久化）。
+    private var devicePassword = ""
 
-    fun setDevice(device: CollectorDevice) {
+    fun setDevice(device: CollectorDevice, password: String = "") {
         paused = false
+        devicePassword = password
         resetViewerConnection()
         _state.value = ViewerState(selectedDevice = device, status = ViewerStatus.Connecting)
         connectViewerStream(device)
@@ -205,15 +210,30 @@ class ViewerViewModel(application: Application) : AndroidViewModel(application) 
             if (connection == null) {
                 val result = runCatching {
                     withContext(Dispatchers.IO) {
-                        LanViewerConnector().connect(device, timeoutMillis = VIEWER_CONNECT_TIMEOUT_MILLIS)
+                        LanViewerConnector().connect(
+                            device = device,
+                            timeoutMillis = VIEWER_CONNECT_TIMEOUT_MILLIS,
+                            password = devicePassword,
+                        )
                     }
                 }
                 connection = result.getOrNull()
                 lastError = result.exceptionOrNull()
+                // 密码错误：不重试（重试只会再次被拒），清除已保存密码并明确提示，
+                // 用户返回列表重新点击时需再次输入密码。
+                if (lastError is AuthFailedException) {
+                    ClientSavedPasswords.clearPassword(getApplication(), device.deviceId)
+                    onResult(null, "密码错误")
+                    return@launch
+                }
                 if (connection == null && attempt < maxAttempts - 1) {
                     delay(VIEWER_RECONNECT_FAST_INTERVAL_MILLIS)
                 }
             }
+        }
+        // 握手成功（收到 Hello）即验证通过：保存密码，二次进入免输入。
+        if (connection != null && devicePassword.isNotEmpty()) {
+            ClientSavedPasswords.savePassword(getApplication(), device.deviceId, devicePassword)
         }
         onResult(connection, lastError?.message)
     }
@@ -226,7 +246,11 @@ class ViewerViewModel(application: Application) : AndroidViewModel(application) 
         while (isViewerGenerationActive(generation, device)) {
             val result = runCatching {
                 withContext(Dispatchers.IO) {
-                    LanViewerConnector().connect(device, timeoutMillis = VIEWER_CONNECT_TIMEOUT_MILLIS)
+                    LanViewerConnector().connect(
+                        device = device,
+                        timeoutMillis = VIEWER_CONNECT_TIMEOUT_MILLIS,
+                        password = devicePassword,
+                    )
                 }
             }
             val connection = result.getOrNull()
@@ -237,6 +261,17 @@ class ViewerViewModel(application: Application) : AndroidViewModel(application) 
                 }
                 _viewerConnectionState.value = connection
                 startViewerStreamIfReady(generation)
+                return@launch
+            }
+            // 密码错误（采集端改密后重连）：停止重试并清除已保存密码，回列表重新输入。
+            if (result.exceptionOrNull() is AuthFailedException) {
+                ClientSavedPasswords.clearPassword(getApplication(), device.deviceId)
+                if (isViewerGenerationActive(generation, device)) {
+                    _state.value = _state.value.copy(
+                        status = ViewerStatus.Error,
+                        errorMessage = "密码错误",
+                    )
+                }
                 return@launch
             }
             lastError = result.exceptionOrNull()

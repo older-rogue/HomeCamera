@@ -71,7 +71,10 @@ class ViewerActivity : ComponentActivity() {
             val lastFrameTimeText by viewModel.lastFrameTimeText.collectAsState()
 
             LaunchedEffect(device) {
-                device?.let { viewModel.setDevice(it) }
+                device?.let {
+                    val password = intent.getStringExtra(CollectorDevice.EXTRA_DEVICE_PASSWORD).orEmpty()
+                    viewModel.setDevice(it, password)
+                }
             }
 
             LaunchedEffect(state.status, state.errorMessage) {

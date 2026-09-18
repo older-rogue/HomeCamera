@@ -81,6 +81,78 @@ class ControlProtocolTest {
     }
 
     @Test
+    fun viewStartRoundTripsWithPassword() {
+        val message = ControlMessage.ViewStart(
+            clientId = "client-phone",
+            udpPort = 62011,
+            password = "家庭监控密码",
+        )
+
+        val encoded = ControlProtocol.encode(message)
+        val decoded = ControlProtocol.decode(encoded)
+
+        assertEquals(message, decoded)
+    }
+
+    @Test
+    fun viewStartDecodesLegacyMessageWithoutPasswordAsEmpty() {
+        // 旧客户端不带 password 字段，解码后应默认为空串。
+        val legacy = listOf(
+            "HOME_CAMERA_CONTROL",
+            "version=1",
+            "type=VIEW_START",
+            "clientId=client-phone",
+            "udpPort=62011",
+        ).joinToString("|")
+
+        val decoded = ControlProtocol.decode(legacy) as? ControlMessage.ViewStart
+
+        assertEquals("client-phone", decoded?.clientId)
+        assertEquals(62011, decoded?.udpPort)
+        assertEquals("", decoded?.password)
+    }
+
+    @Test
+    fun viewStartOmitsEmptyPasswordFromPayload() {
+        val message = ControlMessage.ViewStart(clientId = "c1", udpPort = 62011, password = "")
+
+        val encoded = ControlProtocol.encode(message)
+
+        // 空密码不应出现在协议串中（保持旧客户端/旧采集端兼容）。
+        assertEquals(false, encoded.contains("password="))
+    }
+
+    @Test
+    fun authFailedRoundTripsWithReason() {
+        val message = ControlMessage.AuthFailed(reason = "密码错误")
+
+        val encoded = ControlProtocol.encode(message)
+        val decoded = ControlProtocol.decode(encoded)
+
+        assertEquals(message, decoded)
+    }
+
+    @Test
+    fun listRecordingsRoundTripsWithPassword() {
+        val message = ControlMessage.ListRecordings(date = "2026-07-21", password = "pw")
+
+        val encoded = ControlProtocol.encode(message)
+        val decoded = ControlProtocol.decode(encoded)
+
+        assertEquals(message, decoded)
+    }
+
+    @Test
+    fun openRecordingRoundTripsWithPassword() {
+        val message = ControlMessage.OpenRecording(fileId = "2026-07-21/14-30-00.mp4", password = "pw")
+
+        val encoded = ControlProtocol.encode(message)
+        val decoded = ControlProtocol.decode(encoded)
+
+        assertEquals(message, decoded)
+    }
+
+    @Test
     fun requestKeyFrameMessageRoundTripsWithReason() {
         val message = ControlMessage.RequestKeyFrame(reason = "video_queue_drop")
 

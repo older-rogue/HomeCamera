@@ -10,6 +10,7 @@ import java.util.concurrent.Executors
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
+import org.junit.Assert.fail
 import org.junit.Test
 
 class LanViewerConnectorTest {
@@ -68,6 +69,86 @@ class LanViewerConnectorTest {
             assertTrue(result.udpSocket?.localPort in 1..65535)
             result.close()
             executor.shutdownNow()
+        }
+    }
+
+    @Test
+    fun sendsPasswordInViewStart() {
+        ServerSocket(0).use { server ->
+            val executor = Executors.newSingleThreadExecutor()
+            executor.execute {
+                server.accept().use { socket ->
+                    val reader = BufferedReader(InputStreamReader(socket.getInputStream(), Charsets.UTF_8))
+                    val request = ControlProtocol.decode(reader.readLine())
+                    require(request is ControlMessage.ViewStart)
+                    assertEquals("家庭监控密码", request.password)
+
+                    val writer = socket.getOutputStream().bufferedWriter(Charsets.UTF_8)
+                    writer.write(
+                        ControlProtocol.encode(
+                            ControlMessage.Hello(
+                                deviceId = "collector-1",
+                                deviceName = "采集端",
+                                udpPort = 62010,
+                            ),
+                        ),
+                    )
+                    writer.newLine()
+                    writer.flush()
+                }
+            }
+
+            val result = LanViewerConnector().connect(
+                device = CollectorDevice(
+                    deviceId = "collector-1",
+                    name = "采集端",
+                    hostAddress = "127.0.0.1",
+                    tcpPort = server.localPort,
+                    online = true,
+                ),
+                timeoutMillis = 1_000,
+                password = "家庭监控密码",
+            )
+
+            assertEquals("collector-1", result.collectorDeviceId)
+            result.close()
+            executor.shutdownNow()
+        }
+    }
+
+    @Test
+    fun throwsAuthFailedExceptionWhenCollectorRejectsPassword() {
+        ServerSocket(0).use { server ->
+            val executor = Executors.newSingleThreadExecutor()
+            executor.execute {
+                server.accept().use { socket ->
+                    val reader = BufferedReader(InputStreamReader(socket.getInputStream(), Charsets.UTF_8))
+                    ControlProtocol.decode(reader.readLine())
+                    val writer = socket.getOutputStream().bufferedWriter(Charsets.UTF_8)
+                    writer.write(ControlProtocol.encode(ControlMessage.AuthFailed("密码错误")))
+                    writer.newLine()
+                    writer.flush()
+                }
+            }
+
+            try {
+                LanViewerConnector().connect(
+                    device = CollectorDevice(
+                        deviceId = "collector-1",
+                        name = "采集端",
+                        hostAddress = "127.0.0.1",
+                        tcpPort = server.localPort,
+                        online = true,
+                    ),
+                    timeoutMillis = 1_000,
+                    password = "wrong-password",
+                )
+                fail("Expected AuthFailedException")
+            } catch (expected: AuthFailedException) {
+                assertEquals("密码错误", expected.message)
+            } finally {
+                executor.shutdownNow()
+            }
         }
     }
 }

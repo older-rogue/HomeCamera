@@ -46,6 +46,42 @@ class Mp4SegmentRecorder(
     private var firstVideoSampleLogged = false
 
     /**
+     * 首个 segment 是否预期含音频轨（麦克风已授权）。为 true 时，首个 segment 会等待
+     * 音频编码器格式就绪再开启，避免音频初始化晚于视频时把首段截成一个几秒的微小文件。
+     */
+    @Volatile
+    private var audioExpected = false
+
+    /**
+     * 等待音频格式期间见到的首个视频关键帧时间（微秒）。用于超时兜底。
+     */
+    private var firstAudioWaitKeyframeMicros: Long? = null
+
+    /**
+     * 声明后续是否会有音频轨道（麦克风权限已授予则传 true）。应在编码器产出任何
+     * 关键帧之前设置，否则首个关键帧可能抢先以纯视频方式开启 segment。
+     */
+    fun setAudioExpected(expected: Boolean) {
+        audioExpected = expected
+    }
+
+    /**
+     * 首个 segment 是否可开启：无音频预期或音频格式已就绪时立即就绪；
+     * 有音频预期但格式未到，则等待（首个关键帧起 [AUDIO_WAIT_TIMEOUT_MICROS] 内），
+     * 超时后按纯视频兜底（音频初始化失败/未授权场景不能无限阻塞录像）。
+     */
+    internal fun isAudioReadyForFirstSegment(timestampMicros: Long): Boolean {
+        if (!audioExpected || audioOutputFormat != null) {
+            firstAudioWaitKeyframeMicros = null
+            return true
+        }
+        if (firstAudioWaitKeyframeMicros == null) {
+            firstAudioWaitKeyframeMicros = timestampMicros
+        }
+        return timestampMicros - firstAudioWaitKeyframeMicros!! >= AUDIO_WAIT_TIMEOUT_MICROS
+    }
+
+    /**
      * 写入 mp4 容器的旋转标记（0/90/180/270）。由采集端根据 sensorOrientation 与
      * displayRotation 的相对旋转设置，使播放器/相册按正确朝向显示。默认 0（不旋转）。
      */
@@ -96,6 +132,9 @@ class Mp4SegmentRecorder(
         val isKeyFrame = flags and MediaUdpPacket.FLAG_KEY_FRAME != 0
         if (clock.shouldStartSegment(timestampMicros)) {
             if (!isKeyFrame || videoOutputFormat == null) return
+            // 音频预期存在但格式未就绪：先等音频，避免首段被截成几秒的微小文件
+            // （音频编码器初始化晚于视频时，旧逻辑会在音频格式到达瞬间关闭首段）。
+            if (!isAudioReadyForFirstSegment(timestampMicros)) return
             startSegment(timestampMicros)
         } else if (clock.shouldRotate(timestampMicros, isKeyFrame)) {
             closeCurrentSegment()
@@ -152,6 +191,7 @@ class Mp4SegmentRecorder(
     fun stop() {
         closeCurrentSegment()
         clock.reset()
+        firstAudioWaitKeyframeMicros = null
     }
 
     private fun startSegment(timestampMicros: Long) {
@@ -189,6 +229,7 @@ class Mp4SegmentRecorder(
         videoSegmentBaseMicros = timestampMicros
         audioSegmentBaseMicros = -1L
         audioBaseCaptured = false
+        firstAudioWaitKeyframeMicros = null
         clock.onSegmentStarted(timestampMicros)
         onSegmentStarted()
     }
@@ -203,6 +244,7 @@ class Mp4SegmentRecorder(
         firstVideoSampleLogged = false
         audioBaseCaptured = false
         audioSegmentBaseMicros = -1L
+        firstAudioWaitKeyframeMicros = null
         // muxer.stop 已把 moov 写到文件末尾，触发异步 faststart 重排（moov 前移），
         // 优化后续 HTTP 边下边播的首次加载。回调内自行调度到后台线程，不阻塞录制。
         currentSegmentFile?.let { onSegmentClosed(it) }
@@ -243,6 +285,12 @@ class Mp4SegmentRecorder(
     companion object {
         private const val TAG = "Mp4SegmentRecorder"
         private const val ERROR_REPORT_INTERVAL_MILLIS = 5_000L
+
+        /**
+         * 首个 segment 等待音频格式的超时时间。音频编码器初始化通常 <1s；
+         * 超过该时长仍未就绪（初始化失败等）则按纯视频开启，不能无限阻塞录像。
+         */
+        private const val AUDIO_WAIT_TIMEOUT_MICROS = 5_000_000L
 
         /**
          * 计算写入 mp4 的相对时间戳。负值兜底为 0，避免 MediaMuxer 拒绝负 PTS。

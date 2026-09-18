@@ -12,7 +12,12 @@ import java.net.Socket
 import java.util.UUID
 
 class LanViewerConnector {
-    fun connect(device: CollectorDevice, timeoutMillis: Int): ViewerConnection {
+    /**
+     * 连接采集端并完成握手。password 为采集端访问密码；采集端开启密码且不匹配时
+     * 回复 [ControlMessage.AuthFailed]，这里抛出 [AuthFailedException] 供上层区分"密码错误"
+     * 与普通连接失败（后者用于清除已保存密码并重新提示输入）。
+     */
+    fun connect(device: CollectorDevice, timeoutMillis: Int, password: String = ""): ViewerConnection {
         val socket = Socket()
         val udpSocket = DatagramSocket(0)
         try {
@@ -27,6 +32,7 @@ class LanViewerConnector {
                     ControlMessage.ViewStart(
                         clientId = UUID.randomUUID().toString(),
                         udpPort = udpSocket.localPort,
+                        password = password,
                     ),
                 ),
             )
@@ -36,6 +42,9 @@ class LanViewerConnector {
 
             val reader = BufferedReader(InputStreamReader(socket.getInputStream(), Charsets.UTF_8))
             val response = ControlProtocol.decode(reader.readLine())
+            if (response is ControlMessage.AuthFailed) {
+                throw AuthFailedException(response.reason.ifBlank { "密码错误" })
+            }
             require(response is ControlMessage.Hello) {
                 "Collector did not return HELLO"
             }
@@ -96,3 +105,8 @@ data class ViewerConnection(
         udpSocket?.runCatching { close() }
     }
 }
+
+/**
+ * 采集端拒绝访问（密码错误）。与网络层异常区分，使观看页能明确提示并清除已保存密码。
+ */
+class AuthFailedException(message: String) : Exception(message)

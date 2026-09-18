@@ -89,6 +89,11 @@ data class CollectorDevice(
         const val EXTRA_HOST_ADDRESS = "host_address"
         const val EXTRA_TCP_PORT = "tcp_port"
         const val EXTRA_ONLINE = "online"
+        /**
+         * 客户端传入观看页的访问密码（不经 [CollectorDevice] 模型，属凭据而非设备属性，
+         * 由 [ClientListActivity] 设置、[ViewerActivity] 读取）。
+         */
+        const val EXTRA_DEVICE_PASSWORD = "device_password"
 
         fun fromIntent(intent: Intent): CollectorDevice? {
             val hostAddress = intent.getStringExtra(EXTRA_HOST_ADDRESS) ?: return null
